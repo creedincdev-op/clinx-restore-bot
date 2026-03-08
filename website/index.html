@@ -705,6 +705,48 @@
       box-shadow: 0 10px 24px rgba(20, 47, 96, .35);
     }
 
+    .legal {
+      padding: 72px 0;
+      border-top: 1px solid rgba(58, 91, 159, .31);
+      background: linear-gradient(180deg, rgba(11, 26, 54, .45), rgba(8, 16, 33, .35));
+    }
+
+    .legal-grid {
+      margin-top: 20px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .legal-card {
+      border: 1px solid #3f67ae;
+      border-radius: 14px;
+      background: linear-gradient(180deg, #10244c, #0c1d3e);
+      padding: 16px;
+      display: grid;
+      gap: 10px;
+      transition: transform .24s ease, box-shadow .24s ease, border-color .24s ease;
+    }
+
+    .legal-card:hover {
+      transform: translateY(-4px);
+      border-color: #5d84c8;
+      box-shadow: 0 12px 24px rgba(20, 47, 96, .35);
+    }
+
+    .legal-card h3 {
+      margin: 0;
+      font-size: 1.05rem;
+      font-weight: 800;
+    }
+
+    .legal-card p {
+      margin: 0;
+      color: #b6cbe7;
+      line-height: 1.6;
+      font-size: .92rem;
+    }
+
     .cta-panel p {
       margin: 0 0 12px;
       color: #bfd1eb;
@@ -770,6 +812,10 @@
       .metrics {
         max-width: 100%;
       }
+
+      .legal-grid {
+        grid-template-columns: 1fr;
+      }
     }
 
     @media (max-width: 720px) {
@@ -819,6 +865,7 @@
           <a href="#features">Features</a>
           <a href="#premium">Premium</a>
           <a href="#faq">FAQ</a>
+          <a href="#legal">Legal</a>
           <a href="../creed_terminal.html" target="_blank" rel="noreferrer">Terminal UI</a>
         </nav>
 
@@ -1091,6 +1138,30 @@
           <div class="cta-panel">
             <p>Didnt find answer ?</p>
             <a class="btn hot" href="https://discord.gg/V6YEw2Wxcb" target="_blank" rel="noreferrer">Join Support Discord</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="legal" id="legal">
+        <div class="container fade">
+          <h2 class="section-title">Legal & Docs</h2>
+          <p class="section-sub">Use the buttons below to open different policy and licensing pages.</p>
+          <div class="legal-grid">
+            <article class="legal-card">
+              <h3>License</h3>
+              <p>Open the software license for CLINX project usage and distribution terms.</p>
+              <a class="btn" href="./license.html" target="_blank" rel="noreferrer">Open License</a>
+            </article>
+            <article class="legal-card">
+              <h3>Terms & Conditions</h3>
+              <p>Read the service rules and usage terms for CLINX website and bot features.</p>
+              <a class="btn" href="./terms.html" target="_blank" rel="noreferrer">Open Terms</a>
+            </article>
+            <article class="legal-card">
+              <h3>Privacy Policy</h3>
+              <p>Review what data is processed and how your information is handled by CLINX.</p>
+              <a class="btn" href="./privacy.html" target="_blank" rel="noreferrer">Open Privacy</a>
+            </article>
           </div>
         </div>
       </section>
