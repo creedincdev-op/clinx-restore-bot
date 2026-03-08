@@ -1,0 +1,671 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Creed Terminal</title>
+  <style>
+    :root {
+      --bg: #050505;
+      --bg-soft: #090909;
+      --panel: #0c0c0c;
+      --line: #1c1c1c;
+      --line-2: #2a2a2a;
+      --text: #f3f3f3;
+      --text-soft: #d9d9d9;
+      --muted: #8e8e8e;
+      --muted-2: #707070;
+      --blue: #54a8ff;
+      --glow: rgba(255, 255, 255, 0.09);
+      --glow-2: rgba(255, 255, 255, 0.16);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Consolas, "SFMono-Regular", Menlo, Monaco, "Courier New", monospace;
+      overflow: hidden;
+    }
+
+    body {
+      display: flex;
+    }
+
+    .app {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      background:
+        radial-gradient(circle at top left, rgba(255,255,255,0.035), transparent 22%),
+        linear-gradient(to bottom, rgba(255,255,255,0.015), rgba(255,255,255,0));
+    }
+
+    .topbar {
+      height: 46px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 12px;
+      border-bottom: 1px solid #111;
+      background: #060606;
+      flex-shrink: 0;
+    }
+
+    .tab {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      height: 34px;
+      padding: 0 14px;
+      border: 1px solid #2d2d2d;
+      border-bottom-color: #161616;
+      border-radius: 10px 10px 0 0;
+      background: #0a0a0a;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.03),
+        0 0 0 1px rgba(255,255,255,0.01);
+      color: var(--text-soft);
+    }
+
+    .tab-square {
+      width: 11px;
+      height: 11px;
+      border-radius: 2px;
+      background: #d6d6d6;
+      opacity: 0.95;
+      box-shadow: 0 0 8px rgba(255,255,255,0.12);
+      flex-shrink: 0;
+    }
+
+    .tab-title {
+      font-size: 14px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 280px;
+    }
+
+    .top-plus {
+      color: #cfcfcf;
+      opacity: 0.8;
+      font-size: 20px;
+      line-height: 1;
+      margin-left: 6px;
+    }
+
+    .top-chevron {
+      color: #9a9a9a;
+      font-size: 16px;
+      line-height: 1;
+      margin-left: -2px;
+    }
+
+    .terminal {
+      position: relative;
+      flex: 1;
+      overflow: auto;
+      padding: 18px 24px 90px;
+      background: var(--bg);
+      scroll-behavior: smooth;
+    }
+
+    .terminal::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background: linear-gradient(rgba(255,255,255,0.018) 1px, transparent 1px);
+      background-size: 100% 3px;
+      opacity: 0.07;
+      mix-blend-mode: screen;
+    }
+
+    .terminal::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background: radial-gradient(circle at center, transparent 35%, rgba(0,0,0,0.2) 100%);
+      opacity: 0.45;
+    }
+
+    .output {
+      position: relative;
+      z-index: 1;
+      max-width: 1100px;
+    }
+
+    .intro-card {
+      width: fit-content;
+      min-width: 410px;
+      max-width: 100%;
+      border: 1px solid #5a5a5a;
+      border-radius: 6px;
+      padding: 12px 14px;
+      margin-bottom: 24px;
+      background: linear-gradient(to bottom, rgba(255,255,255,0.022), rgba(255,255,255,0.01));
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.03),
+        0 0 22px rgba(255,255,255,0.02);
+    }
+
+    .brand {
+      font-size: 15px;
+      color: var(--text);
+      margin-bottom: 12px;
+    }
+
+    .dim {
+      color: var(--muted);
+    }
+
+    .meta-row {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      line-height: 1.65;
+      flex-wrap: wrap;
+    }
+
+    .meta-label {
+      width: 92px;
+      color: var(--muted);
+      flex-shrink: 0;
+    }
+
+    .meta-value {
+      color: var(--text);
+    }
+
+    .meta-link {
+      color: var(--blue);
+    }
+
+    .line {
+      position: relative;
+      display: block;
+      line-height: 1.55;
+      margin: 0 0 7px 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--text);
+      text-shadow: 0 0 8px rgba(255,255,255,0.02);
+    }
+
+    .line.soft {
+      color: var(--muted);
+    }
+
+    .line.bullet {
+      padding-left: 16px;
+    }
+
+    .line.bullet::before {
+      content: "•";
+      position: absolute;
+      left: 0;
+      top: 0;
+      color: var(--text-soft);
+    }
+
+    .line.command {
+      color: var(--muted);
+    }
+
+    .line.system {
+      color: var(--text-soft);
+    }
+
+    .line.ready {
+      color: var(--muted);
+    }
+
+    .stream {
+      position: relative;
+      display: inline;
+      isolation: isolate;
+    }
+
+    .stream.glow {
+      text-shadow:
+        0 0 6px rgba(255,255,255,0.03),
+        0 0 14px rgba(255,255,255,0.025);
+    }
+
+    .stream.sweep::after {
+      content: "";
+      position: absolute;
+      top: -8%;
+      left: -18%;
+      width: 24%;
+      height: 116%;
+      pointer-events: none;
+      background: linear-gradient(
+        90deg,
+        rgba(255,255,255,0) 0%,
+        rgba(255,255,255,0.12) 30%,
+        rgba(255,255,255,0.32) 50%,
+        rgba(255,255,255,0.12) 70%,
+        rgba(255,255,255,0) 100%
+      );
+      filter: blur(1.4px);
+      transform: skewX(-12deg);
+      animation: textSweep 2s linear infinite;
+      mix-blend-mode: screen;
+      z-index: 2;
+    }
+
+    .stream.sweep.strong::after {
+      width: 28%;
+      background: linear-gradient(
+        90deg,
+        rgba(255,255,255,0) 0%,
+        rgba(255,255,255,0.16) 28%,
+        rgba(255,255,255,0.42) 50%,
+        rgba(255,255,255,0.16) 72%,
+        rgba(255,255,255,0) 100%
+      );
+      filter: blur(1px);
+      animation-duration: 1.65s;
+    }
+
+    .stream.sweep.slow::after {
+      animation-duration: 2.7s;
+      opacity: 0.85;
+    }
+
+    @keyframes textSweep {
+      0% {
+        transform: translateX(0%) skewX(-12deg);
+        opacity: 0;
+      }
+      10% {
+        opacity: 1;
+      }
+      100% {
+        transform: translateX(520%) skewX(-12deg);
+        opacity: 0;
+      }
+    }
+
+    .cursor {
+      display: inline-block;
+      width: 10px;
+      height: 1.05em;
+      margin-left: 4px;
+      vertical-align: -0.17em;
+      background: #f6f6f6;
+      box-shadow:
+        0 0 10px rgba(255,255,255,0.18),
+        0 0 20px rgba(255,255,255,0.06);
+      animation: blink 1s steps(1, end) infinite;
+    }
+
+    @keyframes blink {
+      0%, 49% { opacity: 1; }
+      50%, 100% { opacity: 0; }
+    }
+
+    .input-row {
+      margin-top: 12px;
+      color: var(--text-soft);
+    }
+
+    .prompt {
+      display: inline-block;
+      color: var(--text-soft);
+      margin-right: 8px;
+    }
+
+    .gap {
+      height: 10px;
+    }
+
+    .statusbar {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      padding: 0 14px;
+      border-top: 1px solid #131313;
+      background: rgba(7, 7, 7, 0.97);
+      color: #8c8c8c;
+      font-size: 13px;
+      z-index: 4;
+      backdrop-filter: blur(6px);
+    }
+
+    .statusbar .spacer {
+      flex: 1;
+    }
+
+    @media (max-width: 640px) {
+      .terminal {
+        padding: 16px 14px 88px;
+      }
+
+      .intro-card {
+        min-width: 100%;
+      }
+
+      .tab-title {
+        max-width: 170px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="topbar">
+      <div class="tab">
+        <span class="tab-square"></span>
+        <span class="tab-title">C:\WINDOWS\system32\cmd.exe</span>
+      </div>
+      <span class="top-plus">+</span>
+      <span class="top-chevron">⌄</span>
+    </div>
+
+    <main class="terminal" id="terminal">
+      <div class="output" id="output">
+        <div class="intro-card">
+          <div class="brand">&gt;_ <strong>Creed Terminal</strong> <span class="dim">(v1.0.0)</span></div>
+
+          <div class="meta-row">
+            <span class="meta-label">model:</span>
+            <span class="meta-value">creed-core</span>
+            <span class="meta-link">/model</span>
+            <span class="dim">to change</span>
+          </div>
+
+          <div class="meta-row">
+            <span class="meta-label">directory:</span>
+            <span class="meta-value">~</span>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <div class="statusbar">
+      <span>creed-core default</span>
+      <span class="spacer"></span>
+      <span>100% left</span>
+      <span>&nbsp;·&nbsp;~</span>
+    </div>
+  </div>
+
+  <script>
+    const terminal = document.getElementById("terminal");
+    const output = document.getElementById("output");
+
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+    function scrollToBottom() {
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    function createLine({
+      className = "",
+      prefix = "",
+      sweep = false,
+      strongSweep = false,
+      slowSweep = false,
+      glow = true
+    } = {}) {
+      const line = document.createElement("div");
+      line.className = `line ${className}`.trim();
+
+      if (prefix) {
+        const prompt = document.createElement("span");
+        prompt.className = "prompt";
+        prompt.textContent = prefix;
+        line.appendChild(prompt);
+      }
+
+      const span = document.createElement("span");
+      span.className = "stream";
+      if (glow) span.classList.add("glow");
+      if (sweep) span.classList.add("sweep");
+      if (strongSweep) span.classList.add("strong");
+      if (slowSweep) span.classList.add("slow");
+
+      line.appendChild(span);
+      output.appendChild(line);
+      scrollToBottom();
+
+      return { line, span };
+    }
+
+    async function typeText(
+      target,
+      text,
+      speed = 18
+    ) {
+      for (let i = 0; i < text.length; i++) {
+        target.textContent += text[i];
+        scrollToBottom();
+
+        const ch = text[i];
+        if (ch === ".") {
+          await sleep(speed + 42);
+        } else if (ch === ",") {
+          await sleep(speed + 18);
+        } else if (ch === ":") {
+          await sleep(speed + 26);
+        } else {
+          await sleep(speed);
+        }
+      }
+    }
+
+    function addStaticLine(text = "", className = "") {
+      const line = document.createElement("div");
+      line.className = `line ${className}`.trim();
+      line.textContent = text;
+      output.appendChild(line);
+      scrollToBottom();
+      return line;
+    }
+
+    function removeLastCursor() {
+      const last = output.querySelector(".input-row:last-child .cursor");
+      if (last) last.remove();
+    }
+
+    function addInputLine(text = "") {
+      const line = document.createElement("div");
+      line.className = "line input-row";
+      line.innerHTML = `<span class="prompt">&gt;</span><span>${escapeHtml(text)}</span><span class="cursor"></span>`;
+      output.appendChild(line);
+      scrollToBottom();
+      return line;
+    }
+
+    function escapeHtml(str) {
+      return str
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    async function terminalLine(text, options = {}) {
+      const {
+        className = "",
+        prefix = "",
+        speed = 18,
+        sweep = true,
+        strongSweep = false,
+        slowSweep = false,
+        glow = true
+      } = options;
+
+      const { span } = createLine({
+        className,
+        prefix,
+        sweep,
+        strongSweep,
+        slowSweep,
+        glow
+      });
+
+      await typeText(span, text, speed);
+      return span;
+    }
+
+    async function bootSequence() {
+      await terminalLine(
+        "Tip: New Try the Creed App, now available on Windows, with 2x rate limits until April 2nd. Run 'creed app' or visit https://example.com/creed",
+        {
+          className: "system",
+          speed: 10,
+          sweep: true,
+          strongSweep: false,
+          slowSweep: true,
+          glow: true
+        }
+      );
+
+      addStaticLine("", "gap");
+
+      await terminalLine("Setting up sandbox... (13s)", {
+        className: "bullet",
+        speed: 22,
+        sweep: true,
+        strongSweep: true,
+        glow: true
+      });
+
+      await terminalLine("↳ Hang tight, this may take a few minutes", {
+        className: "soft",
+        speed: 14,
+        sweep: true,
+        strongSweep: false,
+        slowSweep: true,
+        glow: true
+      });
+
+      addStaticLine("", "gap");
+
+      await terminalLine("Input disabled until setup completes.", {
+        className: "command",
+        prefix: ">",
+        speed: 16,
+        sweep: true,
+        strongSweep: false,
+        slowSweep: true
+      });
+
+      addStaticLine("", "gap");
+
+      await terminalLine("Setting up sandbox... (50s)", {
+        className: "bullet",
+        speed: 22,
+        sweep: true,
+        strongSweep: true,
+        glow: true
+      });
+
+      await terminalLine("↳ Hang tight, this may take a few minutes", {
+        className: "soft",
+        speed: 14,
+        sweep: true,
+        strongSweep: false,
+        slowSweep: true,
+        glow: true
+      });
+
+      addStaticLine("", "gap");
+
+      await terminalLine("Input disabled until setup completes.", {
+        className: "command",
+        prefix: ">",
+        speed: 16,
+        sweep: true,
+        strongSweep: false,
+        slowSweep: true
+      });
+
+      addStaticLine("", "gap");
+
+      await terminalLine("creed-core default · 100% left · ~", {
+        className: "ready",
+        speed: 12,
+        sweep: true,
+        strongSweep: false,
+        slowSweep: true,
+        glow: false
+      });
+
+      addInputLine("");
+    }
+
+    async function say(text, options = {}) {
+      removeLastCursor();
+
+      await terminalLine(text, {
+        className: options.className || "",
+        prefix: options.prefix || "",
+        speed: options.speed ?? 14,
+        sweep: options.sweep ?? true,
+        strongSweep: options.strongSweep ?? true,
+        slowSweep: options.slowSweep ?? false,
+        glow: options.glow ?? true
+      });
+
+      addInputLine("");
+    }
+
+    function clearTerminal() {
+      output.innerHTML = `
+        <div class="intro-card">
+          <div class="brand">&gt;_ <strong>Creed Terminal</strong> <span class="dim">(v1.0.0)</span></div>
+
+          <div class="meta-row">
+            <span class="meta-label">model:</span>
+            <span class="meta-value">creed-core</span>
+            <span class="meta-link">/model</span>
+            <span class="dim">to change</span>
+          </div>
+
+          <div class="meta-row">
+            <span class="meta-label">directory:</span>
+            <span class="meta-value">~</span>
+          </div>
+        </div>
+      `;
+      scrollToBottom();
+    }
+
+    async function user(text) {
+      removeLastCursor();
+      addInputLine(text);
+      const cursor = output.querySelector(".input-row:last-child .cursor");
+      if (cursor) cursor.remove();
+    }
+
+    bootSequence();
+
+    window.terminalBot = {
+      say,
+      user,
+      clear: clearTerminal,
+      async demo() {
+        await say("System ready.", { strongSweep: true, speed: 16 });
+        await say("How can I help you today?", { strongSweep: true, speed: 14 });
+      }
+    };
+  </script>
+</body>
+</html>
