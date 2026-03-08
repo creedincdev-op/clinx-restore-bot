@@ -7,7 +7,7 @@
   <meta name="description" content="CLINX is a high-speed Discord backup and restore platform with action previews, bulk channel creation, and admin-safe workflows." />
   <link rel="icon" type="image/png" href="./assets/clinx-logo-option2-256.png" />
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Syne:wght@500;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Syne:wght@500;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=Press+Start+2P&display=swap');
 
     :root {
       --bg: #06090f;
@@ -39,6 +39,10 @@
       color: var(--text);
       background: var(--bg);
       font-family: 'Plus Jakarta Sans', sans-serif;
+    }
+
+    html {
+      scroll-behavior: smooth;
     }
 
     a {
@@ -421,12 +425,13 @@
       background: linear-gradient(180deg, #10244d, #0f2148);
       border-radius: 14px;
       padding: 14px;
-      transition: transform .2s ease, border-color .2s ease;
+      transition: transform .24s ease, border-color .24s ease, box-shadow .24s ease;
     }
 
     .f-card:hover {
-      transform: translateY(-2px);
+      transform: translateY(-4px);
       border-color: #4b79ca;
+      box-shadow: 0 12px 24px rgba(19, 43, 87, .35);
     }
 
     .f-card h3 {
@@ -546,6 +551,13 @@
       font-size: .9rem;
       color: #d7e7ff;
       line-height: 1.55;
+      transition: transform .24s ease, box-shadow .24s ease, border-color .24s ease;
+    }
+
+    .tile:hover {
+      transform: translateY(-3px);
+      border-color: #5f87ca;
+      box-shadow: 0 10px 22px rgba(25, 58, 117, .34);
     }
 
     .plans {
@@ -559,6 +571,13 @@
       border-radius: 16px;
       background: linear-gradient(180deg, #102246, #0d1c3b);
       overflow: hidden;
+      transition: transform .24s ease, box-shadow .24s ease, border-color .24s ease;
+    }
+
+    .plan:hover {
+      transform: translateY(-4px);
+      border-color: #557dc3;
+      box-shadow: 0 14px 28px rgba(20, 45, 89, .4);
     }
 
     .plan .head {
@@ -678,6 +697,12 @@
       background: linear-gradient(180deg, #11254d, #0d1d3e);
       padding: 18px;
       text-align: center;
+      transition: transform .24s ease, box-shadow .24s ease;
+    }
+
+    .cta-panel:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 10px 24px rgba(20, 47, 96, .35);
     }
 
     .cta-panel p {
@@ -694,6 +719,25 @@
       flex-wrap: wrap;
       color: #aac0dc;
       font-size: .9rem;
+    }
+
+    .footer-brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .footer-copy {
+      font-weight: 700;
+    }
+
+    .pixel {
+      font-family: 'Press Start 2P', monospace;
+      font-size: .62rem;
+      letter-spacing: .02em;
+      color: #9fd6ff;
+      text-transform: uppercase;
     }
 
     .mono {
@@ -1053,7 +1097,10 @@
     </main>
 
     <footer class="container footer">
-      <span>CreeD INC. &lt;/&gt;</span>
+      <span class="footer-brand">
+        <span class="footer-copy">&copy; CreeD INC. &lt;/&gt;</span>
+        <span class="pixel">YUVRAJ</span>
+      </span>
       <span class="mono">Client ID: 1478668338367434833</span>
     </footer>
   </div>
