@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import signal
 import subprocess
 import sys
@@ -52,8 +53,8 @@ def main() -> int:
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
 
-    backoff_seconds = 15
-    max_backoff_seconds = 600
+    backoff_seconds = int(os.getenv("BOT_RESTART_BACKOFF_INITIAL", "300"))
+    max_backoff_seconds = int(os.getenv("BOT_RESTART_BACKOFF_MAX", "7200"))
 
     while not state["stop"]:
         proc = subprocess.Popen([sys.executable, "advanced_restore_bot.py"])
@@ -64,11 +65,13 @@ def main() -> int:
         if state["stop"]:
             break
 
+        jitter = random.randint(0, max(10, backoff_seconds // 10))
+        delay = min(backoff_seconds + jitter, max_backoff_seconds)
         print(
             f"Bot process exited with code {code}. "
-            f"Restarting in {backoff_seconds} seconds..."
+            f"Restarting in {delay} seconds..."
         )
-        time.sleep(backoff_seconds)
+        time.sleep(delay)
         backoff_seconds = min(backoff_seconds * 2, max_backoff_seconds)
 
     server.shutdown()
