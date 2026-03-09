@@ -4,6 +4,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -34,20 +35,44 @@ def main() -> int:
     port = int(os.getenv("PORT", "10000"))
     server = run_health_server(port)
 
-    bot_proc = subprocess.Popen([sys.executable, "advanced_restore_bot.py"])
+    # Render env values are sometimes pasted with quotes; normalize once.
+    token = os.getenv("BOT_TOKEN", "").strip().strip("\"'")
+    if token:
+        os.environ["BOT_TOKEN"] = token
+
+    state = {"stop": False, "proc": None}
 
     def shutdown_handler(signum, frame) -> None:
+        state["stop"] = True
+        proc = state["proc"]
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
         server.shutdown()
-        if bot_proc.poll() is None:
-            bot_proc.terminate()
-        raise SystemExit(0)
 
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
 
-    code = bot_proc.wait()
+    backoff_seconds = 15
+    max_backoff_seconds = 600
+
+    while not state["stop"]:
+        proc = subprocess.Popen([sys.executable, "advanced_restore_bot.py"])
+        state["proc"] = proc
+        code = proc.wait()
+        state["proc"] = None
+
+        if state["stop"]:
+            break
+
+        print(
+            f"Bot process exited with code {code}. "
+            f"Restarting in {backoff_seconds} seconds..."
+        )
+        time.sleep(backoff_seconds)
+        backoff_seconds = min(backoff_seconds * 2, max_backoff_seconds)
+
     server.shutdown()
-    return code
+    return 0
 
 
 if __name__ == "__main__":
