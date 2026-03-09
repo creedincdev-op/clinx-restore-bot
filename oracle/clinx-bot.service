@@ -1,0 +1,23 @@
+[Unit]
+Description=CLINX Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/clinx-restore-bot
+EnvironmentFile=/home/ubuntu/clinx-restore-bot/.env
+ExecStart=/home/ubuntu/clinx-restore-bot/.venv/bin/python /home/ubuntu/clinx-restore-bot/advanced_restore_bot.py
+Restart=always
+RestartSec=15
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/clinx-restore-bot
+
+[Install]
+WantedBy=multi-user.target
