@@ -4,30 +4,87 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CLINX Privacy Policy</title>
-  <style>
-    @import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Plus+Jakarta+Sans:wght@400;600;700&display=swap');
-    body { margin:0; font-family:'Plus Jakarta Sans',sans-serif; color:#e9f3ff; background:linear-gradient(180deg,#091427,#060a12); }
-    .wrap { width:min(900px,92vw); margin:40px auto; border:1px solid #335791; border-radius:16px; background:#0d1e3e; padding:24px; }
-    h1 { margin:0 0 12px; font-family:'Syne',sans-serif; }
-    p,li { color:#b9cbe5; line-height:1.7; }
-    .btn { display:inline-block; margin-top:12px; border:1px solid #4f73b8; color:#e9f3ff; border-radius:10px; padding:10px 14px; text-decoration:none; }
-  </style>
+  <meta name="description" content="Privacy policy for CLINX website and Discord bot workflows." />
+  <meta name="theme-color" content="#081120" />
+  <link rel="icon" type="image/png" href="./assets/clinx-logo-option2-256.png" />
+  <link rel="stylesheet" href="./assets/css/legal.css" />
 </head>
 <body>
-  <main class="wrap">
-    <h1>Privacy Policy</h1>
-    <p>CLINX stores only the minimum data needed for backup and restore workflows.</p>
-    <ul>
-      <li>Server structure snapshots may be stored locally for load/restore commands.</li>
-      <li>No sale of user data.</li>
-      <li>Admins can remove local backup data at any time from storage files.</li>
-      <li>Support requests may include logs shared voluntarily by server admins.</li>
-    </ul>
-    <a class="btn" href="./index.html">Back to Website</a>
-  </main>
+  <div class="page">
+    <header class="topbar">
+      <div class="container topbar-inner">
+        <a class="brand" href="./index.html">
+          <img src="./assets/clinx-logo-option2-256.png" alt="CLINX logo" />
+          <span>CLINX</span><small>CreeD INC. &lt;/&gt;</small>
+        </a>
+        <div class="topbar-actions">
+          <a class="btn" href="./index.html">Back to Website</a>
+          <a class="btn primary" href="https://discord.gg/V6YEw2Wxcb" target="_blank" rel="noreferrer">Support Discord</a>
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="hero">
+        <div class="eyebrow">Privacy Policy</div>
+        <h1>CLINX keeps data handling narrow</h1>
+        <p>
+          CLINX is built around backup and restore workflows. The service is intended to process only the information
+          required to execute those workflows and support admins during recovery operations.
+        </p>
+        <div class="meta">
+          <span class="meta-chip">Minimum necessary data</span>
+          <span class="meta-chip">No data sale</span>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2>Data CLINX May Process</h2>
+          <ul class="list">
+            <li>Server structure snapshots such as roles, channels, categories, and related configuration values.</li>
+            <li>Backup identifiers and restore workflow metadata required to complete import or load operations.</li>
+            <li>Logs or screenshots voluntarily shared by admins during support requests.</li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <h2>How Data Is Used</h2>
+          <ul class="list">
+            <li>To create backups, compare restore targets, and execute selected load actions.</li>
+            <li>To diagnose failed commands, import issues, or bot configuration problems.</li>
+            <li>To improve workflow safety, visibility, and product support.</li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <h2>Retention and Control</h2>
+          <p>
+            Backup snapshots may be stored locally as part of the bot's restore workflow. Admins retain operational
+            control over those files and can remove local backup data from storage when it is no longer needed.
+          </p>
+        </article>
+
+        <article class="card">
+          <h2>What CLINX Does Not Do</h2>
+          <ul class="list">
+            <li>CLINX does not sell user data.</li>
+            <li>CLINX is not intended to collect more information than the workflow requires.</li>
+            <li>Support data is not collected unless you choose to share it.</li>
+          </ul>
+        </article>
+      </section>
+    </main>
+
+    <footer class="container footer">
+      <span>CLINX privacy page</span>
+      <span class="mono">Support: discord.gg/V6YEw2Wxcb</span>
+    </footer>
+  </div>
   <script>
     window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
   </script>
   <script defer src="/_vercel/insights/script.js"></script>
+  <script defer src="/_vercel/speed-insights/script.js"></script>
 </body>
 </html>
