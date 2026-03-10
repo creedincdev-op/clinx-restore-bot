@@ -34,7 +34,11 @@ start.bat
 - `/import status`
 - `/import cancel`
 
-## Panels`n`n- `/panel boostrewards``n- `/panel suggestion``n`n## Utility
+## Panels
+
+- `/panel suggestion`
+
+## Utility
 
 - `/help`
 - `/invite`
@@ -53,6 +57,8 @@ Then Confirm/Cancel buttons execute the selected plan.
 
 ## Mass Channel Paste Format
 
+`/masschannels` opens a modal so you can paste a larger layout in one or two chunks.
+
 ```text
 [Start Here]
 welcome | New members start here
@@ -63,6 +69,13 @@ rules | Read rules first
 chat
 media | Image and video sharing
 voice: Hangout VC
+
+GENERAL
+chat
+clips
+
+Support:
+# tickets | Open a ticket here
 ```
 
 

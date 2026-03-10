@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable, TypeVar
 
 import discord
 from discord import app_commands
@@ -27,6 +27,9 @@ EMBED_ERR = 0xE74C3C
 EMBED_INFO = 0x3498DB
 
 IMPORT_JOBS: dict[int, dict[str, Any]] = {}
+ACTION_DELAY_SECONDS = max(0.0, float(os.getenv("DISCORD_ACTION_DELAY_SECONDS", "1.0")))
+ACTION_RETRY_LIMIT = max(1, int(os.getenv("DISCORD_ACTION_RETRY_LIMIT", "5")))
+T = TypeVar("T")
 
 
 def utc_now_iso() -> str:
@@ -78,9 +81,16 @@ class ParsedChannel:
     category: str | None
 
 
+@dataclass
+class LayoutLine:
+    raw: str
+    text: str
+    indent: int
+
+
 def clean_channel_name(raw: str) -> str:
     name = raw.strip().lower()
-    name = re.sub(r"^[\s\-*\d.)]+", "", name)
+    name = re.sub(r"^[\s\-*]+", "", name)
     name = name.replace("#", "")
     name = re.sub(r"\s+", "-", name)
     name = re.sub(r"[^a-z0-9_\-]", "", name)
@@ -88,38 +98,146 @@ def clean_channel_name(raw: str) -> str:
     return name[:100]
 
 
+def clean_category_name(raw: str) -> str:
+    name = raw.strip().strip("[]")
+    name = re.sub(r"^[\s\-*•·▪▫●○◆◇▶▷▸▹►➜➤➥│┃┆┊└├┌┬╰╭╮╯─═>]+", "", name).strip()
+    name = re.sub(r"\s{2,}", " ", name)
+    name = re.sub(r"\s*:\s*$", "", name)
+    return name[:100]
+
+
+def strip_layout_prefix(raw: str) -> str:
+    cleaned = raw.strip()
+    cleaned = re.sub(r"^[`>]+", "", cleaned).strip()
+    cleaned = re.sub(r"^[\-\*\u2022\u00b7\u25aa\u25ab\u25cf\u25cb\u25c6\u25c7\u25b6\u25b7\u25b8\u25b9\u25ba\u279c\u27a4\u27a5│┃┆┊└├┌┬╰╭╮╯─═]+\s*", "", cleaned)
+    cleaned = re.sub(r"^[0-9]+\.\s*", "", cleaned)
+    return cleaned.strip()
+
+
+def mostly_upper(text: str) -> bool:
+    letters = [char for char in text if char.isalpha()]
+    if not letters:
+        return False
+    upper = sum(1 for char in letters if char.isupper())
+    return upper / len(letters) >= 0.75
+
+
+def build_layout_lines(layout: str) -> list[LayoutLine]:
+    lines: list[LayoutLine] = []
+    for raw_line in layout.splitlines():
+        if not raw_line.strip():
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" \t"))
+        text = strip_layout_prefix(raw_line)
+        if text:
+            lines.append(LayoutLine(raw=raw_line, text=text, indent=indent))
+    return lines
+
+
+def is_explicit_category_line(text: str) -> bool:
+    lowered = text.lower()
+    if re.match(r"^\[(.+?)\]$", text):
+        return True
+    if lowered.startswith("category:"):
+        return True
+    if text.endswith(":") and not lowered.startswith(("voice:", "text:")):
+        return True
+    return False
+
+
+def is_explicit_channel_line(text: str) -> bool:
+    lowered = text.lower()
+    if lowered.startswith(("voice:", "text:")):
+        return True
+    if text.startswith("#"):
+        return True
+    if "|" in text:
+        return True
+    return False
+
+
+def resolve_category_name(text: str) -> str:
+    lowered = text.lower()
+    if lowered.startswith("category:"):
+        return clean_category_name(text.split(":", 1)[1])
+    if re.match(r"^#{1,6}\s+.+$", text):
+        return clean_category_name(re.sub(r"^#{1,6}\s+", "", text))
+    if text.endswith(":"):
+        return clean_category_name(text[:-1])
+    return clean_category_name(text)
+
+
+def looks_like_category(index: int, lines: list[LayoutLine]) -> bool:
+    current = lines[index]
+    text = current.text
+
+    if re.match(r"^#{1,6}\s+.+$", text) and "|" not in text:
+        next_line = lines[index + 1] if index + 1 < len(lines) else None
+        heading_text = clean_category_name(re.sub(r"^#{1,6}\s+", "", text))
+        if next_line is not None and heading_text:
+            heading_style = mostly_upper(heading_text) or heading_text.istitle() or " " in heading_text
+            next_channelish = is_explicit_channel_line(next_line.text) or bool(clean_channel_name(next_line.text))
+            if heading_style and next_channelish:
+                return True
+
+    if is_explicit_category_line(text):
+        return True
+    if is_explicit_channel_line(text):
+        return False
+
+    next_line = lines[index + 1] if index + 1 < len(lines) else None
+    if next_line is None:
+        return False
+
+    current_name = clean_category_name(text)
+    next_text = next_line.text
+
+    if not current_name:
+        return False
+
+    if next_line.indent > current.indent:
+        return True
+
+    if mostly_upper(text) and not mostly_upper(next_text):
+        return True
+
+    heading_style = mostly_upper(text) or text.istitle() or any(char.isupper() for char in text)
+    if heading_style and next_line.indent >= current.indent and not is_explicit_category_line(next_text):
+        next_channelish = is_explicit_channel_line(next_text) or bool(clean_channel_name(next_text))
+        return next_channelish
+
+    return False
+
+
 def parse_layout(layout: str) -> list[ParsedChannel]:
     parsed: list[ParsedChannel] = []
     active_category: str | None = None
 
-    for raw_line in layout.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
+    lines = build_layout_lines(layout)
 
-        line = re.sub(r"^[^\w#:\[\]-]+", "", line).strip()
-        if not line:
-            continue
+    for index, entry in enumerate(lines):
+        line = entry.text
 
-        cat_match = re.match(r"^\[(.+?)\]$", line)
-        if cat_match:
-            active_category = cat_match.group(1).strip()[:100]
-            continue
-
-        if line.lower().startswith("category:"):
-            active_category = line.split(":", 1)[1].strip()[:100]
-            continue
-
-        if line.startswith("# "):
-            active_category = line[2:].strip()[:100]
+        if looks_like_category(index, lines):
+            active_category = resolve_category_name(line)
             continue
 
         kind = "text"
-        if line.lower().startswith("voice:"):
+        lowered = line.lower()
+        if lowered.startswith("voice:"):
             kind = "voice"
             line = line.split(":", 1)[1].strip()
-        elif line.lower().startswith("text:"):
+        elif lowered.startswith("text:"):
             line = line.split(":", 1)[1].strip()
+        elif line.startswith("#"):
+            line = line[1:].strip()
+
+        if ">" in line and not line.lower().startswith(("voice:", "text:")):
+            left, right = [part.strip() for part in line.split(">", 1)]
+            left_category = clean_category_name(left)
+            if left_category and right:
+                active_category = left_category
+                line = right
 
         topic = None
         if "|" in line:
@@ -132,6 +250,40 @@ def parse_layout(layout: str) -> list[ParsedChannel]:
             parsed.append(ParsedChannel(kind=kind, name=name, topic=topic, category=active_category))
 
     return parsed
+
+
+def extract_retry_after(exc: discord.HTTPException, fallback: float) -> float:
+    response = getattr(exc, "response", None)
+    if response is not None:
+        header = response.headers.get("Retry-After") or response.headers.get("X-RateLimit-Reset-After")
+        try:
+            return max(float(header), fallback)
+        except (TypeError, ValueError):
+            pass
+    return fallback
+
+
+async def throttled_discord_call(factory: Callable[[], Awaitable[T]]) -> T:
+    last_error: discord.HTTPException | None = None
+
+    for _ in range(ACTION_RETRY_LIMIT):
+        try:
+            result = await factory()
+        except discord.HTTPException as exc:
+            if exc.status != 429:
+                raise
+            last_error = exc
+            await asyncio.sleep(extract_retry_after(exc, ACTION_DELAY_SECONDS or 1.0))
+            continue
+
+        if ACTION_DELAY_SECONDS > 0:
+            await asyncio.sleep(ACTION_DELAY_SECONDS)
+        return result
+
+    if last_error is not None:
+        raise last_error
+
+    raise RuntimeError("Discord action failed before execution.")
 
 
 def serialize_overwrites(overwrites: dict[Any, discord.PermissionOverwrite]) -> list[dict[str, Any]]:
@@ -291,7 +443,7 @@ async def apply_snapshot_to_guild(
     if delete_channels and not create_only_missing:
         for channel in list(target.channels):
             try:
-                await channel.delete(reason="CLINX backup load: delete channels")
+                await throttled_discord_call(lambda channel=channel: channel.delete(reason="CLINX backup load: delete channels"))
                 result["deleted_channels"] += 1
             except discord.Forbidden:
                 pass
@@ -301,7 +453,7 @@ async def apply_snapshot_to_guild(
             if role.managed or role.is_default():
                 continue
             try:
-                await role.delete(reason="CLINX backup load: delete roles")
+                await throttled_discord_call(lambda role=role: role.delete(reason="CLINX backup load: delete roles"))
                 result["deleted_roles"] += 1
             except discord.Forbidden:
                 pass
@@ -314,25 +466,29 @@ async def apply_snapshot_to_guild(
 
             if role is None:
                 try:
-                    await target.create_role(
-                        name=role_data["name"],
-                        permissions=permissions,
-                        colour=color,
-                        hoist=role_data.get("hoist", False),
-                        mentionable=role_data.get("mentionable", False),
-                        reason="CLINX backup load: create role",
+                    await throttled_discord_call(
+                        lambda role_data=role_data, permissions=permissions, color=color: target.create_role(
+                            name=role_data["name"],
+                            permissions=permissions,
+                            colour=color,
+                            hoist=role_data.get("hoist", False),
+                            mentionable=role_data.get("mentionable", False),
+                            reason="CLINX backup load: create role",
+                        )
                     )
                     result["created_roles"] += 1
                 except discord.Forbidden:
                     pass
             else:
                 try:
-                    await role.edit(
-                        permissions=permissions,
-                        colour=color,
-                        hoist=role_data.get("hoist", False),
-                        mentionable=role_data.get("mentionable", False),
-                        reason="CLINX backup load: update role",
+                    await throttled_discord_call(
+                        lambda role=role, permissions=permissions, color=color, role_data=role_data: role.edit(
+                            permissions=permissions,
+                            colour=color,
+                            hoist=role_data.get("hoist", False),
+                            mentionable=role_data.get("mentionable", False),
+                            reason="CLINX backup load: update role",
+                        )
                     )
                     result["updated_roles"] += 1
                 except discord.Forbidden:
@@ -341,12 +497,14 @@ async def apply_snapshot_to_guild(
     if load_settings and not create_only_missing:
         settings = snapshot.get("settings", {})
         try:
-            await target.edit(
-                verification_level=discord.VerificationLevel(settings.get("verification_level", target.verification_level.value)),
-                default_notifications=discord.NotificationLevel(settings.get("default_notifications", target.default_notifications.value)),
-                explicit_content_filter=discord.ContentFilter(settings.get("explicit_content_filter", target.explicit_content_filter.value)),
-                afk_timeout=settings.get("afk_timeout", target.afk_timeout),
-                reason="CLINX backup load: update settings",
+            await throttled_discord_call(
+                lambda settings=settings: target.edit(
+                    verification_level=discord.VerificationLevel(settings.get("verification_level", target.verification_level.value)),
+                    default_notifications=discord.NotificationLevel(settings.get("default_notifications", target.default_notifications.value)),
+                    explicit_content_filter=discord.ContentFilter(settings.get("explicit_content_filter", target.explicit_content_filter.value)),
+                    afk_timeout=settings.get("afk_timeout", target.afk_timeout),
+                    reason="CLINX backup load: update settings",
+                )
             )
             result["updated_settings"] = 1
         except discord.Forbidden:
@@ -361,13 +519,23 @@ async def apply_snapshot_to_guild(
 
             if existing is None:
                 try:
-                    existing = await target.create_category(name=cat_data["name"], overwrites=overwrites)
+                    existing = await throttled_discord_call(
+                        lambda cat_data=cat_data, overwrites=overwrites: target.create_category(
+                            name=cat_data["name"],
+                            overwrites=overwrites,
+                        )
+                    )
                     result["created_categories"] += 1
                 except discord.Forbidden:
                     continue
             elif not create_only_missing:
                 try:
-                    await existing.edit(overwrites=overwrites, position=cat_data.get("position", existing.position))
+                    await throttled_discord_call(
+                        lambda existing=existing, overwrites=overwrites, cat_data=cat_data: existing.edit(
+                            overwrites=overwrites,
+                            position=cat_data.get("position", existing.position),
+                        )
+                    )
                 except discord.Forbidden:
                     pass
 
@@ -381,21 +549,25 @@ async def apply_snapshot_to_guild(
             if existing is None:
                 try:
                     if ch_data["type"] == "text":
-                        await target.create_text_channel(
-                            name=ch_data["name"],
-                            category=category,
-                            topic=ch_data.get("topic"),
-                            slowmode_delay=ch_data.get("slowmode_delay", 0),
-                            nsfw=ch_data.get("nsfw", False),
-                            overwrites=overwrites,
+                        await throttled_discord_call(
+                            lambda ch_data=ch_data, category=category, overwrites=overwrites: target.create_text_channel(
+                                name=ch_data["name"],
+                                category=category,
+                                topic=ch_data.get("topic"),
+                                slowmode_delay=ch_data.get("slowmode_delay", 0),
+                                nsfw=ch_data.get("nsfw", False),
+                                overwrites=overwrites,
+                            )
                         )
                     elif ch_data["type"] == "voice":
-                        await target.create_voice_channel(
-                            name=ch_data["name"],
-                            category=category,
-                            bitrate=ch_data.get("bitrate"),
-                            user_limit=ch_data.get("user_limit", 0),
-                            overwrites=overwrites,
+                        await throttled_discord_call(
+                            lambda ch_data=ch_data, category=category, overwrites=overwrites: target.create_voice_channel(
+                                name=ch_data["name"],
+                                category=category,
+                                bitrate=ch_data.get("bitrate"),
+                                user_limit=ch_data.get("user_limit", 0),
+                                overwrites=overwrites,
+                            )
                         )
                     result["created_channels"] += 1
                 except discord.Forbidden:
@@ -407,24 +579,91 @@ async def apply_snapshot_to_guild(
 
             try:
                 if isinstance(existing, discord.TextChannel) and ch_data["type"] == "text":
-                    await existing.edit(
-                        category=category,
-                        topic=ch_data.get("topic"),
-                        slowmode_delay=ch_data.get("slowmode_delay", 0),
-                        nsfw=ch_data.get("nsfw", False),
-                        overwrites=overwrites,
+                    await throttled_discord_call(
+                        lambda existing=existing, category=category, ch_data=ch_data, overwrites=overwrites: existing.edit(
+                            category=category,
+                            topic=ch_data.get("topic"),
+                            slowmode_delay=ch_data.get("slowmode_delay", 0),
+                            nsfw=ch_data.get("nsfw", False),
+                            overwrites=overwrites,
+                        )
                     )
                     result["updated_channels"] += 1
                 elif isinstance(existing, discord.VoiceChannel) and ch_data["type"] == "voice":
-                    await existing.edit(
-                        category=category,
-                        bitrate=ch_data.get("bitrate", existing.bitrate),
-                        user_limit=ch_data.get("user_limit", 0),
-                        overwrites=overwrites,
+                    await throttled_discord_call(
+                        lambda existing=existing, category=category, ch_data=ch_data, overwrites=overwrites: existing.edit(
+                            category=category,
+                            bitrate=ch_data.get("bitrate", existing.bitrate),
+                            user_limit=ch_data.get("user_limit", 0),
+                            overwrites=overwrites,
+                        )
                     )
                     result["updated_channels"] += 1
             except discord.Forbidden:
                 pass
+
+    return result
+
+
+async def create_mass_channels_from_layout(
+    guild: discord.Guild,
+    layout: str,
+    *,
+    create_categories: bool,
+) -> dict[str, int]:
+    items = parse_layout(layout)
+    if not items:
+        raise ValueError("No valid channels found in layout.")
+
+    result = {
+        "created_categories": 0,
+        "created_channels": 0,
+        "skipped_channels": 0,
+    }
+
+    category_cache: dict[str, discord.CategoryChannel] = {category.name: category for category in guild.categories}
+    seen_channels: set[tuple[str | None, str]] = set()
+
+    for item in items:
+        category = None
+        if item.category:
+            category = category_cache.get(item.category)
+            if category is None and create_categories:
+                category = await throttled_discord_call(
+                    lambda item=item: guild.create_category(item.category)
+                )
+                category_cache[item.category] = category
+                result["created_categories"] += 1
+
+        channel_key = (item.category, item.name)
+        if channel_key in seen_channels:
+            result["skipped_channels"] += 1
+            continue
+        seen_channels.add(channel_key)
+
+        existing_channel = discord.utils.get(guild.channels, name=item.name)
+        if existing_channel is not None:
+            existing_category = existing_channel.category.name if isinstance(existing_channel, (discord.TextChannel, discord.VoiceChannel)) and existing_channel.category else None
+            if existing_category == item.category or existing_category is None:
+                result["skipped_channels"] += 1
+                continue
+
+        if item.kind == "voice":
+            await throttled_discord_call(
+                lambda item=item, category=category: guild.create_voice_channel(
+                    name=item.name,
+                    category=category,
+                )
+            )
+        else:
+            await throttled_discord_call(
+                lambda item=item, category=category: guild.create_text_channel(
+                    name=item.name,
+                    category=category,
+                    topic=item.topic,
+                )
+            )
+        result["created_channels"] += 1
 
     return result
 
@@ -727,7 +966,9 @@ async def cleantoday(interaction: discord.Interaction, confirm: bool = False) ->
     deleted = 0
     for ch in targets:
         try:
-            await ch.delete(reason=f"/cleantoday by {interaction.user}")
+            await throttled_discord_call(
+                lambda ch=ch: ch.delete(reason=f"/cleantoday by {interaction.user}")
+            )
             deleted += 1
         except discord.Forbidden:
             pass
@@ -735,69 +976,62 @@ async def cleantoday(interaction: discord.Interaction, confirm: bool = False) ->
     await interaction.followup.send(embed=make_embed("Clean Today Complete", f"Deleted `{deleted}` channels.", EMBED_OK), ephemeral=True)
 
 
-@bot.tree.command(name="masschannels", description="Create channels from pasted layout text")
+class MassChannelsModal(discord.ui.Modal, title="Mass Channel Creator"):
+    layout_input = discord.ui.TextInput(
+        label="Layout",
+        placeholder="[Welcome]\nrules | Read before chatting\nannouncements\n\nGeneral:\nchat\nmedia | Image drops\nvoice: Hangout",
+        style=discord.TextStyle.paragraph,
+        max_length=4000,
+    )
+    extra_layout_input = discord.ui.TextInput(
+        label="More Layout (optional)",
+        placeholder="Paste the next chunk here if your layout is long.",
+        style=discord.TextStyle.paragraph,
+        max_length=4000,
+        required=False,
+    )
+
+    def __init__(self, create_categories: bool) -> None:
+        super().__init__()
+        self.create_categories = create_categories
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(embed=make_embed("Error", "Run this command in a server.", EMBED_ERR), ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        layout = self.layout_input.value
+        if self.extra_layout_input.value:
+            layout = f"{layout}\n{self.extra_layout_input.value}"
+
+        try:
+            stats = await create_mass_channels_from_layout(
+                guild,
+                layout,
+                create_categories=self.create_categories,
+            )
+        except ValueError as exc:
+            await interaction.followup.send(embed=make_embed("Mass Channels", str(exc), EMBED_ERR), ephemeral=True)
+            return
+
+        summary = (
+            f"Created categories: `{stats['created_categories']}`\n"
+            f"Created channels: `{stats['created_channels']}`\n"
+            f"Skipped existing/duplicates: `{stats['skipped_channels']}`"
+        )
+        await interaction.followup.send(embed=make_embed("Mass Create Complete", summary, EMBED_OK), ephemeral=True)
+
+
+@bot.tree.command(name="masschannels", description="Open the bulk channel creator modal")
 @app_commands.default_permissions(administrator=True)
-async def masschannels(interaction: discord.Interaction, layout: str, create_categories: bool = True) -> None:
-    await interaction.response.defer(ephemeral=True, thinking=True)
-
-    guild = interaction.guild
-    if guild is None:
-        await interaction.followup.send(embed=make_embed("Error", "Run this command in a server.", EMBED_ERR), ephemeral=True)
+async def masschannels(interaction: discord.Interaction, create_categories: bool = True) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message(embed=make_embed("Error", "Run this command in a server.", EMBED_ERR), ephemeral=True)
         return
 
-    items = parse_layout(layout)
-    if not items:
-        await interaction.followup.send(embed=make_embed("Mass Channels", "No valid channels found in layout.", EMBED_ERR), ephemeral=True)
-        return
-
-    created = 0
-    skipped = 0
-    category_cache: dict[str, discord.CategoryChannel] = {c.name: c for c in guild.categories}
-
-    for item in items:
-        category = None
-        if item.category:
-            category = category_cache.get(item.category)
-            if category is None and create_categories:
-                category = await guild.create_category(item.category)
-                category_cache[item.category] = category
-
-        if discord.utils.get(guild.channels, name=item.name):
-            skipped += 1
-            continue
-
-        if item.kind == "voice":
-            await guild.create_voice_channel(name=item.name, category=category)
-        else:
-            await guild.create_text_channel(name=item.name, category=category, topic=item.topic)
-        created += 1
-
-    await interaction.followup.send(embed=make_embed("Mass Create Complete", f"Created: `{created}`\nSkipped existing: `{skipped}`", EMBED_OK), ephemeral=True)
-
-
-
-class BoostPanelView(discord.ui.View):
-    def __init__(self) -> None:
-        super().__init__(timeout=300)
-        self.bot_select = discord.ui.Select(
-            placeholder="Choose custom bot",
-            min_values=1,
-            max_values=1,
-            options=[discord.SelectOption(label="Custom bot", value="custom_bot", emoji="🚀")],
-        )
-        self.bot_select.callback = self._on_select
-        self.add_item(self.bot_select)
-
-    async def _on_select(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
-
-    @discord.ui.button(label="Claim", style=discord.ButtonStyle.success)
-    async def claim(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await interaction.response.send_message(
-            embed=make_embed("Claim Submitted", "Boost reward claim received.", EMBED_OK, interaction),
-            ephemeral=True,
-        )
-
+    await interaction.response.send_modal(MassChannelsModal(create_categories=create_categories))
 
 class SuggestionModal(discord.ui.Modal, title="Suggestion Form"):
     title_input = discord.ui.TextInput(label="Title", placeholder="Feature title", max_length=100)
@@ -824,26 +1058,6 @@ class SuggestionPanelView(discord.ui.View):
     @discord.ui.button(label="Suggestion", emoji="💡", style=discord.ButtonStyle.primary)
     async def open_suggestion(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(SuggestionModal())
-
-
-@panel_group.command(name="boostrewards", description="Send a boost rewards panel")
-async def panel_boost_rewards(interaction: discord.Interaction) -> None:
-    desc = (
-        "**Boost Rewards**\n\n"
-        "1 Boost Rewards\n"
-        "- Promote your server\n"
-        "- Access to use banner and /dmall\n\n"
-        "2 Boost Rewards\n"
-        "- 1.1 boost rewards + DM all bot source code\n"
-        "- 2.1 boost rewards + custom user install bot with host\n\n"
-        "**Custom bot**\n"
-        "User install bots work everywhere no need to add them to a server."
-    )
-    await interaction.response.send_message(
-        embed=make_embed("@everyone", desc, EMBED_INFO, interaction),
-        view=BoostPanelView(),
-    )
-
 
 @panel_group.command(name="suggestion", description="Send a suggestion form panel")
 async def panel_suggestion(interaction: discord.Interaction) -> None:
@@ -1082,7 +1296,7 @@ async def help_cmd(interaction: discord.Interaction) -> None:
         "`/restore_missing` `cleantoday` `masschannels`\n"
         "`/export guild|channels|channel|roles|role|message|reactions`\n"
         "`/import guild|status|cancel`\n"
-        "`/panel boostrewards|suggestion`\nAliases: `/backupcreate` and `/backupload`"
+        "`/panel suggestion`\nAliases: `/backupcreate` and `/backupload`"
     )
     await interaction.response.send_message(embed=make_embed("CLINX Help", desc, EMBED_INFO), ephemeral=True)
 

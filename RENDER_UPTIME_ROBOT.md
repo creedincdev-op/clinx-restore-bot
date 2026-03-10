@@ -19,6 +19,8 @@
 - `BOT_RESTART_BACKOFF_MAX` = `7200`
 - `BOT_RAPID_EXIT_SECONDS` = `180`
 - `BOT_STARTUP_JITTER_MAX` = `45`
+- `DISCORD_ACTION_DELAY_SECONDS` = `1.0`
+- `DISCORD_ACTION_RETRY_LIMIT` = `5`
 
 ## Repo defaults
 - `.python-version` pins Render to Python `3.13`
