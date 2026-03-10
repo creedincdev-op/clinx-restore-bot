@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: clinx-restore-bot
+    runtime: python
+    plan: free
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python render_start.py
+    healthCheckPath: /healthz
+    maxShutdownDelaySeconds: 120
+    autoDeployTrigger: commit
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: BOT_LOGIN_429_COOLDOWN
+        value: "1800"
+      - key: BOT_LOGIN_429_COOLDOWN_MAX
+        value: "7200"
+      - key: BOT_RESTART_BACKOFF_INITIAL
+        value: "900"
+      - key: BOT_RESTART_BACKOFF_MAX
+        value: "7200"
+      - key: BOT_RAPID_EXIT_SECONDS
+        value: "180"
+      - key: BOT_STARTUP_JITTER_MAX
+        value: "45"

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -523,7 +524,28 @@ intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+
+class ClinxBot(commands.Bot):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._groups_added = False
+        self._startup_synced = False
+
+    async def setup_hook(self) -> None:
+        if not self._groups_added:
+            self.tree.add_command(backup_group)
+            self.tree.add_command(export_group)
+            self.tree.add_command(import_group)
+            self.tree.add_command(panel_group)
+            self._groups_added = True
+
+        if not self._startup_synced:
+            synced = await self.tree.sync()
+            self._startup_synced = True
+            print(f"Synced {len(synced)} slash commands")
+
+
+bot = ClinxBot(command_prefix="!", intents=intents)
 
 backup_group = app_commands.Group(name="backup", description="Backup and restore commands")
 export_group = app_commands.Group(name="export", description="Export server objects")
@@ -533,16 +555,7 @@ panel_group = app_commands.Group(name="panel", description="Send styled embed pa
 
 @bot.event
 async def on_ready() -> None:
-    if not getattr(bot, "_groups_added", False):
-        bot.tree.add_command(backup_group)
-        bot.tree.add_command(export_group)
-        bot.tree.add_command(import_group)
-        bot.tree.add_command(panel_group)
-        bot._groups_added = True
-
-    synced = await bot.tree.sync()
     print(f"Logged in as {bot.user} ({bot.user.id})")
-    print(f"Synced {len(synced)} slash commands")
 
 
 @bot.tree.error
@@ -1098,7 +1111,36 @@ if __name__ == "__main__":
         raise RuntimeError("BOT_TOKEN is not set. Put BOT_TOKEN in .env and run start.bat")
 
     ensure_storage()
-    bot.run(TOKEN)
+    cooldown_seconds = max(60, int(os.getenv("BOT_LOGIN_429_COOLDOWN", "900")))
+    backoff_cap_seconds = max(cooldown_seconds, int(os.getenv("BOT_LOGIN_429_COOLDOWN_MAX", "3600")))
+
+    while True:
+        try:
+            bot.run(TOKEN)
+            break
+        except discord.LoginFailure:
+            raise
+        except discord.HTTPException as exc:
+            if exc.status != 429:
+                raise
+
+            response = getattr(exc, "response", None)
+            retry_header = None
+            if response is not None:
+                retry_header = response.headers.get("Retry-After") or response.headers.get("X-RateLimit-Reset-After")
+
+            try:
+                retry_after = max(float(retry_header), float(cooldown_seconds)) if retry_header else float(cooldown_seconds)
+            except (TypeError, ValueError):
+                retry_after = float(cooldown_seconds)
+
+            wait_seconds = min(int(retry_after), backoff_cap_seconds)
+            print(
+                "Discord login is rate limited (HTTP 429). "
+                f"Waiting {wait_seconds} seconds before retrying."
+            )
+            time.sleep(wait_seconds)
+            cooldown_seconds = min(cooldown_seconds * 2, backoff_cap_seconds)
 
 
 

@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 data/backups.json
+data/render_runtime_state.json
