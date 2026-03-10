@@ -545,7 +545,7 @@ class ClinxBot(commands.Bot):
             print(f"Synced {len(synced)} slash commands")
 
 
-bot = ClinxBot(command_prefix="!", intents=intents)
+bot = ClinxBot(command_prefix=commands.when_mentioned, intents=intents)
 
 backup_group = app_commands.Group(name="backup", description="Backup and restore commands")
 export_group = app_commands.Group(name="export", description="Export server objects")
