@@ -60,17 +60,93 @@ def make_embed(
 def ensure_storage() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not BACKUP_FILE.exists():
-        BACKUP_FILE.write_text(json.dumps({"backups": {}}, indent=2), encoding="utf-8")
+        BACKUP_FILE.write_text(json.dumps({"backups": {}, "users": {}}, indent=2), encoding="utf-8")
+
+
+def normalize_backup_store(store: dict[str, Any]) -> dict[str, Any]:
+    backups = store.get("backups")
+    if not isinstance(backups, dict):
+        backups = {}
+    store["backups"] = backups
+
+    users = store.get("users")
+    if not isinstance(users, dict):
+        users = {}
+    store["users"] = users
+
+    for backup_id, record in backups.items():
+        if not isinstance(record, dict):
+            continue
+
+        user_id = record.get("created_by_user_id")
+        if user_id is None:
+            continue
+
+        user_key = str(user_id)
+        user_entry = users.setdefault(
+            user_key,
+            {
+                "user_id": user_id,
+                "display_name": record.get("created_by_display_name", "Unknown User"),
+                "backup_ids": [],
+            },
+        )
+        if not isinstance(user_entry.get("backup_ids"), list):
+            user_entry["backup_ids"] = []
+        if backup_id not in user_entry["backup_ids"]:
+            user_entry["backup_ids"].append(backup_id)
+
+    return store
 
 
 def load_backup_store() -> dict[str, Any]:
     ensure_storage()
-    return json.loads(BACKUP_FILE.read_text(encoding="utf-8"))
+    store = json.loads(BACKUP_FILE.read_text(encoding="utf-8"))
+    return normalize_backup_store(store)
 
 
 def save_backup_store(store: dict[str, Any]) -> None:
     ensure_storage()
-    BACKUP_FILE.write_text(json.dumps(store, indent=2), encoding="utf-8")
+    normalized = normalize_backup_store(store)
+    BACKUP_FILE.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+
+
+def register_backup_owner(
+    store: dict[str, Any],
+    *,
+    backup_id: str,
+    user_id: int,
+    display_name: str,
+) -> None:
+    users = store.setdefault("users", {})
+    user_key = str(user_id)
+    user_entry = users.setdefault(
+        user_key,
+        {
+            "user_id": user_id,
+            "display_name": display_name,
+            "backup_ids": [],
+        },
+    )
+    user_entry["display_name"] = display_name
+    if not isinstance(user_entry.get("backup_ids"), list):
+        user_entry["backup_ids"] = []
+    if backup_id not in user_entry["backup_ids"]:
+        user_entry["backup_ids"].append(backup_id)
+
+
+def unregister_backup_owner(store: dict[str, Any], *, backup_id: str, user_id: int | None) -> None:
+    if user_id is None:
+        return
+
+    users = store.get("users", {})
+    user_entry = users.get(str(user_id))
+    if not isinstance(user_entry, dict):
+        return
+
+    backup_ids = user_entry.get("backup_ids")
+    if isinstance(backup_ids, list):
+        user_entry["backup_ids"] = [item for item in backup_ids if item != backup_id]
 
 
 @dataclass
@@ -823,10 +899,18 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
     store["backups"][backup_id] = {
         "id": backup_id,
         "created_at": utc_now_iso(),
+        "created_by_user_id": interaction.user.id,
+        "created_by_display_name": str(interaction.user),
         "source_guild_id": source.id,
         "source_guild_name": source.name,
         "snapshot": serialize_guild_snapshot(source),
     }
+    register_backup_owner(
+        store,
+        backup_id=backup_id,
+        user_id=interaction.user.id,
+        display_name=str(interaction.user),
+    )
     save_backup_store(store)
 
     await interaction.followup.send(
@@ -873,7 +957,11 @@ async def backup_list(interaction: discord.Interaction) -> None:
         await interaction.response.send_message(embed=make_embed("Backups", "No backups found.", EMBED_INFO), ephemeral=True)
         return
 
-    lines = [f"`{e['id']}` - {e.get('source_guild_name', 'unknown')}" for e in reversed(entries)]
+    lines = []
+    for entry in reversed(entries):
+        owner_name = entry.get("created_by_display_name", "Unknown User")
+        source_name = entry.get("source_guild_name", "unknown")
+        lines.append(f"`{entry['id']}` - {source_name} - by `{owner_name}`")
     await interaction.response.send_message(embed=make_embed("Backups", "\n".join(lines), EMBED_INFO), ephemeral=True)
 
 
@@ -882,10 +970,16 @@ async def backup_list(interaction: discord.Interaction) -> None:
 @app_commands.default_permissions(administrator=True)
 async def backup_delete(interaction: discord.Interaction, load_id: str) -> None:
     store = load_backup_store()
-    if load_id not in store.get("backups", {}):
+    record = store.get("backups", {}).get(load_id)
+    if record is None:
         await interaction.response.send_message(embed=make_embed("Error", "Load ID not found.", EMBED_ERR), ephemeral=True)
         return
 
+    unregister_backup_owner(
+        store,
+        backup_id=load_id,
+        user_id=record.get("created_by_user_id"),
+    )
     del store["backups"][load_id]
     save_backup_store(store)
     await interaction.response.send_message(embed=make_embed("Deleted", f"Removed `{load_id}`.", EMBED_OK), ephemeral=True)
