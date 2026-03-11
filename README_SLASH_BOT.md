@@ -6,6 +6,12 @@
 start.bat
 ```
 
+## 24/7 Hosting
+
+- Oracle Always Free: `ORACLE_ALWAYS_FREE.md`
+- Hosting summary: `HOSTING_24_7.md`
+- Render setup: `RENDER_UPTIME_ROBOT.md`
+
 ## Core Commands
 
 - `/backup create`
@@ -37,10 +43,12 @@ start.bat
 ## Panels
 
 - `/panel suggestion`
+  Posts the public CLINX suggestion board and keeps the command acknowledgement private.
 
 ## Utility
 
 - `/help`
+  Opens the interactive CLINX command library.
 - `/invite`
 - `/leave`
 

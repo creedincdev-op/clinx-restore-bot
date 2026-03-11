@@ -17,6 +17,7 @@ from discord.ext import commands
 
 TOKEN = os.getenv("BOT_TOKEN")
 DEFAULT_BACKUP_GUILD_ID = os.getenv("DEFAULT_BACKUP_GUILD_ID")
+SUPPORT_SERVER_URL = os.getenv("SUPPORT_SERVER_URL", "https://discord.gg/V6YEw2Wxcb")
 
 DATA_DIR = Path(__file__).parent / "data"
 BACKUP_FILE = DATA_DIR / "backups.json"
@@ -55,6 +56,11 @@ def make_embed(
         )
     embed.set_footer(text="CLINX")
     return embed
+
+
+def build_invite_link() -> str:
+    app_id = bot.user.id if "bot" in globals() and bot.user else "YOUR_APP_ID"
+    return f"https://discord.com/oauth2/authorize?client_id={app_id}&permissions=8&integration_type=0&scope=bot+applications.commands"
 
 
 def ensure_storage() -> None:
@@ -157,11 +163,56 @@ class ParsedChannel:
     category: str | None
 
 
+@dataclass(frozen=True)
+class LibraryCommand:
+    name: str
+    summary: str
+    detail: str
+
+
 @dataclass
 class LayoutLine:
     raw: str
     text: str
     indent: int
+
+
+COMMAND_PAGE_SIZE = 5
+LIBRARY_ACCENT = 0x5B7CFF
+SUGGESTION_ACCENT = 0x39D0C8
+COMMAND_LIBRARY: dict[str, list[LibraryCommand]] = {
+    "Backup": [
+        LibraryCommand("backup create", "Create a fresh server backup and return its load ID.", "Snapshots the selected source guild, stores it in the CLINX backup DB, and tags the creator in the backup record."),
+        LibraryCommand("backup load", "Open the restore planner for a saved backup.", "Lets you choose role, channel, and settings actions before CLINX starts the paced restore flow."),
+        LibraryCommand("backup list", "Show recent backups with creator info.", "Lists the latest saved load IDs, source guild names, and who created each backup code."),
+        LibraryCommand("backup delete", "Delete one backup code from the DB.", "Removes the selected backup and also unregisters it from the creator's stored backup list."),
+        LibraryCommand("backupcreate", "Alias of /backup create.", "Shortcut alias for fast backup creation."),
+        LibraryCommand("backupload", "Alias of /backup load.", "Shortcut alias for opening the backup restore planner."),
+    ],
+    "Transfer": [
+        LibraryCommand("restore_missing", "Create only missing categories and channels.", "Compares the source guild snapshot against the target guild and creates only what is absent."),
+        LibraryCommand("cleantoday", "Delete channels created today.", "Runs as a dry-run first unless confirm is enabled, then deletes only channels created on the current UTC date."),
+        LibraryCommand("masschannels", "Open the bulk layout importer modal.", "Paste one or two large layout blocks and CLINX will infer categories, text channels, voice channels, and channel topics."),
+        LibraryCommand("panel suggestion", "Post the public suggestion board.", "Sends a public CLINX suggestion board to the current channel while keeping the command acknowledgement private."),
+    ],
+    "Data": [
+        LibraryCommand("export guild", "Export the full guild snapshot as JSON.", "Includes categories, channels, settings, and roles in one file."),
+        LibraryCommand("export channels", "Export channel data as JSON or CSV.", "Good for auditing channel names, categories, and topics before a migration."),
+        LibraryCommand("export roles", "Export all server roles as JSON or CSV.", "Captures role names, permissions, colors, hoist, mentionability, and positions."),
+        LibraryCommand("export channel", "Export one channel as JSON.", "Useful for quickly inspecting one channel's metadata."),
+        LibraryCommand("export role", "Export one role as JSON.", "Useful for role permission checks and targeted migration prep."),
+        LibraryCommand("export message", "Export one message as JSON.", "Fetches a message by ID and saves author, content, timestamp, and attachment URLs."),
+        LibraryCommand("export reactions", "Export reactions on one message.", "Supports JSON and CSV outputs for reaction counts."),
+        LibraryCommand("import guild", "Start a background import from a snapshot file.", "Reads a guild snapshot JSON and launches a tracked import job."),
+        LibraryCommand("import status", "Check the current import job state.", "Shows running, completed, cancelled, or failed status plus timing details."),
+        LibraryCommand("import cancel", "Cancel a running import job.", "Sends a cancellation request to the active import task for this guild."),
+    ],
+    "Utility": [
+        LibraryCommand("help", "Open the CLINX command library.", "Shows this interactive command browser with categories, paging, and detailed command notes."),
+        LibraryCommand("invite", "Generate the bot invite link.", "Builds the current CLINX OAuth2 invite using the active application ID."),
+        LibraryCommand("leave", "Make CLINX leave the current server.", "Only for admins when you intentionally want the bot removed from a guild."),
+    ],
+}
 
 
 def clean_channel_name(raw: str) -> str:
@@ -845,6 +896,7 @@ class ClinxBot(commands.Bot):
         super().__init__(*args, **kwargs)
         self._groups_added = False
         self._startup_synced = False
+        self._persistent_views_added = False
 
     async def setup_hook(self) -> None:
         if not self._groups_added:
@@ -853,6 +905,10 @@ class ClinxBot(commands.Bot):
             self.tree.add_command(import_group)
             self.tree.add_command(panel_group)
             self._groups_added = True
+
+        if not self._persistent_views_added:
+            self.add_view(SuggestionBoardView())
+            self._persistent_views_added = True
 
         if not self._startup_synced:
             synced = await self.tree.sync()
@@ -1127,42 +1183,297 @@ async def masschannels(interaction: discord.Interaction, create_categories: bool
 
     await interaction.response.send_modal(MassChannelsModal(create_categories=create_categories))
 
-class SuggestionModal(discord.ui.Modal, title="Suggestion Form"):
-    title_input = discord.ui.TextInput(label="Title", placeholder="Feature title", max_length=100)
-    details_input = discord.ui.TextInput(
-        label="Suggestion",
-        placeholder="Describe your idea...",
-        style=discord.TextStyle.paragraph,
-        max_length=1500,
-    )
+class FeedbackModal(discord.ui.Modal):
+    def __init__(self, feedback_kind: str) -> None:
+        super().__init__(title=f"{feedback_kind} Intake")
+        self.feedback_kind = feedback_kind
+        self.title_input = discord.ui.TextInput(
+            label="Title",
+            placeholder=f"{feedback_kind} title",
+            max_length=100,
+        )
+        self.details_input = discord.ui.TextInput(
+            label="Details",
+            placeholder="Write the exact idea, problem, or request here.",
+            style=discord.TextStyle.paragraph,
+            max_length=1800,
+        )
+        self.add_item(self.title_input)
+        self.add_item(self.details_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(
-            embed=make_embed(
-                "Suggestion Received",
-                f"Title: `{self.title_input.value}`\nThanks for helping improve CLINX.",
-                EMBED_OK,
-                interaction,
+        channel = interaction.channel
+        if channel is None:
+            await interaction.response.send_message("Channel not available for feedback posting.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=f"{self.feedback_kind} Intake",
+            description=self.details_input.value,
+            color=SUGGESTION_ACCENT,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Title", value=self.title_input.value, inline=False)
+        embed.add_field(name="Submitted By", value=interaction.user.mention, inline=True)
+        if interaction.guild is not None:
+            embed.add_field(name="Server", value=interaction.guild.name, inline=True)
+        embed.set_footer(text="CLINX Feedback Stream")
+
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        await interaction.response.send_message(f"{self.feedback_kind} sent to this channel.", ephemeral=True)
+
+
+class SuggestionBoardLaunchButton(discord.ui.Button["SuggestionBoardView"]):
+    def __init__(self, feedback_kind: str, *, label: str, style: discord.ButtonStyle, custom_id: str, emoji: str | None = None) -> None:
+        super().__init__(
+            label=label,
+            style=style,
+            custom_id=custom_id,
+            emoji=emoji,
+            row=1,
+        )
+        self.feedback_kind = feedback_kind
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(FeedbackModal(self.feedback_kind))
+
+
+class SuggestionBoardView(discord.ui.LayoutView):
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+        board = discord.ui.Container(
+            discord.ui.TextDisplay("## `<>` CLINX Suggestion Board"),
+            discord.ui.TextDisplay("Drop polished ideas, bug reports, and upgrade requests straight into the current channel."),
+            discord.ui.Separator(),
+            discord.ui.Section(
+                discord.ui.TextDisplay("**How it works**\nUse the buttons below to open the right intake form."),
+                discord.ui.TextDisplay("**Keep it sharp**\nOne request per submission, include context, and explain the expected result."),
+                accessory=discord.ui.Button(
+                    label="Live Intake",
+                    style=discord.ButtonStyle.success,
+                    disabled=True,
+                    custom_id="suggestion-board-badge",
+                ),
             ),
-            ephemeral=True,
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("`Suggestion` is for features, flows, or UX upgrades.\n`Bug Report` is for broken commands, wrong output, or failing restores."),
+            accent_color=SUGGESTION_ACCENT,
+        )
+        self.add_item(board)
+        self.add_item(
+            SuggestionBoardLaunchButton(
+                "Suggestion",
+                label="Submit Suggestion",
+                style=discord.ButtonStyle.primary,
+                custom_id="suggestion-board-open-suggestion",
+                emoji="💡",
+            )
+        )
+        self.add_item(
+            SuggestionBoardLaunchButton(
+                "Bug Report",
+                label="Report Bug",
+                style=discord.ButtonStyle.secondary,
+                custom_id="suggestion-board-open-bug",
+                emoji="🛠️",
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="Support",
+                style=discord.ButtonStyle.link,
+                url=SUPPORT_SERVER_URL,
+                row=1,
+            )
         )
 
 
-class SuggestionPanelView(discord.ui.View):
-    @discord.ui.button(label="Suggestion", emoji="💡", style=discord.ButtonStyle.primary)
-    async def open_suggestion(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await interaction.response.send_modal(SuggestionModal())
+def get_command_entries(category: str) -> list[LibraryCommand]:
+    return COMMAND_LIBRARY[category]
 
-@panel_group.command(name="suggestion", description="Send a suggestion form panel")
+
+def get_command_page_count(category: str) -> int:
+    entries = get_command_entries(category)
+    return max(1, (len(entries) + COMMAND_PAGE_SIZE - 1) // COMMAND_PAGE_SIZE)
+
+
+class LibraryCategoryButton(discord.ui.Button["CommandLibraryView"]):
+    def __init__(self, category: str, current_category: str) -> None:
+        super().__init__(
+            label=category,
+            style=discord.ButtonStyle.primary if category == current_category else discord.ButtonStyle.secondary,
+            row=1,
+        )
+        self.category = category
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.edit_message(view=CommandLibraryView(category=self.category))
+
+
+class LibraryPageButton(discord.ui.Button["CommandLibraryView"]):
+    def __init__(self, *, direction: int, category: str, page: int, selected_command: str | None) -> None:
+        target_page = page + direction
+        max_page = get_command_page_count(category) - 1
+        super().__init__(
+            label="Prev" if direction < 0 else "Next",
+            style=discord.ButtonStyle.secondary,
+            disabled=target_page < 0 or target_page > max_page,
+            row=3,
+        )
+        self.direction = direction
+        self.category = category
+        self.page = page
+        self.selected_command = selected_command
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        next_page = self.page + self.direction
+        max_page = get_command_page_count(self.category) - 1
+        next_page = max(0, min(next_page, max_page))
+        await interaction.response.edit_message(
+            view=CommandLibraryView(
+                category=self.category,
+                page=next_page,
+                selected_command=None,
+            )
+        )
+
+
+class LibraryCommandSelect(discord.ui.Select["CommandLibraryView"]):
+    def __init__(self, category: str, page: int, selected_command: str | None) -> None:
+        entries = get_command_entries(category)
+        start = page * COMMAND_PAGE_SIZE
+        current_page_entries = entries[start : start + COMMAND_PAGE_SIZE]
+        options = [
+            discord.SelectOption(
+                label=f"/{entry.name}",
+                description=entry.summary[:100],
+                value=entry.name,
+                default=entry.name == selected_command,
+            )
+            for entry in current_page_entries
+        ]
+        super().__init__(
+            placeholder="Select a command for details...",
+            options=options,
+            row=2,
+        )
+        self.category = category
+        self.page = page
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.edit_message(
+            view=CommandLibraryView(
+                category=self.category,
+                page=self.page,
+                selected_command=self.values[0],
+            )
+        )
+
+
+class CommandLibraryView(discord.ui.LayoutView):
+    def __init__(self, *, category: str = "Backup", page: int = 0, selected_command: str | None = None) -> None:
+        super().__init__(timeout=900)
+        categories = list(COMMAND_LIBRARY.keys())
+        if category not in COMMAND_LIBRARY:
+            category = categories[0]
+
+        max_page = get_command_page_count(category) - 1
+        page = max(0, min(page, max_page))
+        self.category = category
+        self.page = page
+        self.selected_command = selected_command
+
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay("## `<>` Command Library"),
+                discord.ui.TextDisplay(
+                    f"Explore **{sum(len(entries) for entries in COMMAND_LIBRARY.values())}** CLINX commands with live categories, paging, and deeper command notes."
+                ),
+                discord.ui.Separator(),
+                discord.ui.Section(
+                    discord.ui.TextDisplay(f"**Lane**\n`{self.category}`"),
+                    discord.ui.TextDisplay(f"**Page**\n`{self.page + 1}/{get_command_page_count(self.category)}`"),
+                    accessory=discord.ui.Button(
+                        label=f"{len(get_command_entries(self.category))} commands",
+                        style=discord.ButtonStyle.secondary,
+                        disabled=True,
+                    ),
+                ),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(self.render_page_block()),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(self.render_detail_block()),
+                accent_color=LIBRARY_ACCENT,
+            )
+        )
+
+        for category_name in categories:
+            self.add_item(LibraryCategoryButton(category_name, self.category))
+
+        self.add_item(LibraryCommandSelect(self.category, self.page, self.selected_command))
+        self.add_item(
+            LibraryPageButton(
+                direction=-1,
+                category=self.category,
+                page=self.page,
+                selected_command=self.selected_command,
+            )
+        )
+        self.add_item(
+            LibraryPageButton(
+                direction=1,
+                category=self.category,
+                page=self.page,
+                selected_command=self.selected_command,
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="Invite",
+                style=discord.ButtonStyle.link,
+                url=build_invite_link(),
+                row=3,
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="Support",
+                style=discord.ButtonStyle.link,
+                url=SUPPORT_SERVER_URL,
+                row=3,
+            )
+        )
+
+    def render_page_block(self) -> str:
+        entries = get_command_entries(self.category)
+        start = self.page * COMMAND_PAGE_SIZE
+        current_page_entries = entries[start : start + COMMAND_PAGE_SIZE]
+        lines = [f"- `/{entry.name}` - {entry.summary}" for entry in current_page_entries]
+        return "\n".join(lines)
+
+    def render_detail_block(self) -> str:
+        if not self.selected_command:
+            return "Select a command from the menu below to inspect what it does and where it fits in the workflow."
+
+        for entry in get_command_entries(self.category):
+            if entry.name == self.selected_command:
+                return f"**/{entry.name}**\n{entry.detail}"
+
+        return "Select a command from the menu below to inspect what it does and where it fits in the workflow."
+
+
+@panel_group.command(name="suggestion", description="Post the public suggestion board")
 async def panel_suggestion(interaction: discord.Interaction) -> None:
-    desc = (
-        "Submit your idea to help improve the bot!\n\n"
-        "Click the Suggestion button below to open the submission form."
+    channel = interaction.channel
+    if channel is None:
+        await interaction.response.send_message("Channel not available.", ephemeral=True)
+        return
+
+    await channel.send(
+        view=SuggestionBoardView(),
+        allowed_mentions=discord.AllowedMentions.none(),
     )
-    await interaction.response.send_message(
-        embed=make_embed("Suggestion Form", desc, EMBED_INFO, interaction),
-        view=SuggestionPanelView(),
-    )
+    await interaction.response.send_message("Suggestion board posted in this channel.", ephemeral=True)
 async def send_text_file(interaction: discord.Interaction, text: str, filename: str) -> None:
     data = io.BytesIO(text.encode("utf-8"))
     await interaction.response.send_message(file=discord.File(data, filename=filename), ephemeral=True)
@@ -1385,20 +1696,12 @@ async def import_cancel(interaction: discord.Interaction) -> None:
 
 @bot.tree.command(name="help", description="Get command help")
 async def help_cmd(interaction: discord.Interaction) -> None:
-    desc = (
-        "`/backup create` `load` `list` `delete`\n"
-        "`/restore_missing` `cleantoday` `masschannels`\n"
-        "`/export guild|channels|channel|roles|role|message|reactions`\n"
-        "`/import guild|status|cancel`\n"
-        "`/panel suggestion`\nAliases: `/backupcreate` and `/backupload`"
-    )
-    await interaction.response.send_message(embed=make_embed("CLINX Help", desc, EMBED_INFO), ephemeral=True)
+    await interaction.response.send_message(view=CommandLibraryView())
 
 
 @bot.tree.command(name="invite", description="Get bot invite link")
 async def invite(interaction: discord.Interaction) -> None:
-    app_id = bot.user.id if bot.user else "YOUR_APP_ID"
-    link = f"https://discord.com/oauth2/authorize?client_id={app_id}&permissions=8&integration_type=0&scope=bot+applications.commands"
+    link = build_invite_link()
     await interaction.response.send_message(embed=make_embed("Invite CLINX", link, EMBED_INFO), ephemeral=True)
 
 
