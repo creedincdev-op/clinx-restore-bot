@@ -155,6 +155,85 @@ def unregister_backup_owner(store: dict[str, Any], *, backup_id: str, user_id: i
         user_entry["backup_ids"] = [item for item in backup_ids if item != backup_id]
 
 
+def parse_backup_created_at(record: dict[str, Any]) -> datetime:
+    created_at = record.get("created_at")
+    if isinstance(created_at, str):
+        try:
+            return datetime.fromisoformat(created_at)
+        except ValueError:
+            pass
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def get_user_backup_records(store: dict[str, Any], user_id: int) -> list[dict[str, Any]]:
+    backups = store.get("backups", {})
+    users = store.get("users", {})
+    user_entry = users.get(str(user_id), {})
+    backup_ids = user_entry.get("backup_ids", []) if isinstance(user_entry, dict) else []
+
+    records: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    if isinstance(backup_ids, list):
+        for backup_id in backup_ids:
+            record = backups.get(backup_id)
+            if isinstance(record, dict):
+                records.append(record)
+                seen_ids.add(backup_id)
+
+    for backup_id, record in backups.items():
+        if backup_id in seen_ids or not isinstance(record, dict):
+            continue
+        if record.get("created_by_user_id") == user_id:
+            records.append(record)
+
+    records.sort(key=parse_backup_created_at, reverse=True)
+    return records
+
+
+def format_backup_timestamp(record: dict[str, Any]) -> str:
+    created_at = parse_backup_created_at(record)
+    if created_at == datetime.min.replace(tzinfo=timezone.utc):
+        return "Unknown time"
+    return created_at.astimezone(timezone.utc).strftime("%d %b %Y - %H:%M UTC")
+
+
+def build_backup_choice_label(record: dict[str, Any]) -> str:
+    source_name = str(record.get("source_guild_name", "Unknown Source")).strip() or "Unknown Source"
+    backup_id = str(record.get("id", "UNKNOWN"))
+    timestamp = format_backup_timestamp(record)
+    label = f"{source_name} | {timestamp} ({backup_id})"
+    if len(label) <= 100:
+        return label
+
+    headroom = max(10, 100 - len(timestamp) - len(backup_id) - 6)
+    truncated_source = source_name[:headroom].rstrip()
+    return f"{truncated_source} | {timestamp} ({backup_id})"
+
+
+async def user_backup_id_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    store = load_backup_store()
+    records = get_user_backup_records(store, interaction.user.id)
+    needle = current.casefold().strip()
+    choices: list[app_commands.Choice[str]] = []
+
+    for record in records:
+        backup_id = str(record.get("id", ""))
+        source_name = str(record.get("source_guild_name", ""))
+        timestamp = format_backup_timestamp(record)
+        haystack = f"{backup_id} {source_name} {timestamp}".casefold()
+        if needle and needle not in haystack:
+            continue
+        choices.append(app_commands.Choice(name=build_backup_choice_label(record), value=backup_id))
+        if len(choices) >= 25:
+            break
+
+    return choices
+
+
 @dataclass
 class ParsedChannel:
     kind: str
@@ -198,11 +277,12 @@ BACKUP_ACTION_LABELS = {
 COMMAND_LIBRARY: dict[str, list[LibraryCommand]] = {
     "Backup": [
         LibraryCommand("backup create", "Create a fresh server backup and return its load ID.", "Snapshots the selected source guild, stores it in the CLINX backup DB, and tags the creator in the backup record."),
-        LibraryCommand("backup load", "Open the restore planner for a saved backup.", "Lets you choose role, channel, and settings actions before CLINX starts the paced restore flow."),
-        LibraryCommand("backup list", "Show recent backups with creator info.", "Lists the latest saved load IDs, source guild names, and who created each backup code."),
-        LibraryCommand("backup delete", "Delete one backup code from the DB.", "Removes the selected backup and also unregisters it from the creator's stored backup list."),
+        LibraryCommand("backup load", "Open the restore planner for one of your backups.", "The load ID field autocompletes only backups created by your account and then opens the paced restore planner."),
+        LibraryCommand("backup list", "Show only the backups created by your account.", "Lists your own recent backup IDs with source guild names and exact creation timestamps."),
+        LibraryCommand("backup delete", "Delete one of your backup codes from the DB.", "Removes a backup only if it belongs to your account and unregisters it from your stored backup list."),
         LibraryCommand("backupcreate", "Alias of /backup create.", "Shortcut alias for fast backup creation."),
         LibraryCommand("backupload", "Alias of /backup load.", "Shortcut alias for opening the backup restore planner."),
+        LibraryCommand("backuplist", "Alias of /backup list.", "Shortcut alias for opening your private backup list anywhere CLINX is installed."),
     ],
     "Transfer": [
         LibraryCommand("restore_missing", "Create only missing categories and channels.", "Compares the source guild snapshot against the target guild and creates only what is absent."),
@@ -1318,6 +1398,12 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
     if record is None:
         await interaction.followup.send(embed=make_embed("Invalid Load ID", "No backup found with that ID.", EMBED_ERR), ephemeral=True)
         return
+    if record.get("created_by_user_id") != interaction.user.id:
+        await interaction.followup.send(
+            embed=make_embed("Access Denied", "You can only load backups created by your account.", EMBED_ERR),
+            ephemeral=True,
+        )
+        return
 
     target = interaction.guild if target_guild_id is None else bot.get_guild(target_guild_id)
     if target is None:
@@ -1338,16 +1424,16 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
 @app_commands.default_permissions(administrator=True)
 async def backup_list(interaction: discord.Interaction) -> None:
     store = load_backup_store()
-    entries = list(store.get("backups", {}).values())[-20:]
+    entries = get_user_backup_records(store, interaction.user.id)[:20]
     if not entries:
-        await interaction.response.send_message(embed=make_embed("Backups", "No backups found.", EMBED_INFO), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Backups", "You have not created any backups yet.", EMBED_INFO), ephemeral=True)
         return
 
     lines = []
-    for entry in reversed(entries):
-        owner_name = entry.get("created_by_display_name", "Unknown User")
+    for entry in entries:
         source_name = entry.get("source_guild_name", "unknown")
-        lines.append(f"`{entry['id']}` - {source_name} - by `{owner_name}`")
+        created_at = format_backup_timestamp(entry)
+        lines.append(f"`{entry['id']}`\n`{source_name}` • `{created_at}`")
     await interaction.response.send_message(embed=make_embed("Backups", "\n".join(lines), EMBED_INFO), ephemeral=True)
 
 
@@ -1360,6 +1446,12 @@ async def backup_delete(interaction: discord.Interaction, load_id: str) -> None:
     if record is None:
         await interaction.response.send_message(embed=make_embed("Error", "Load ID not found.", EMBED_ERR), ephemeral=True)
         return
+    if record.get("created_by_user_id") != interaction.user.id:
+        await interaction.response.send_message(
+            embed=make_embed("Access Denied", "You can only delete backups created by your account.", EMBED_ERR),
+            ephemeral=True,
+        )
+        return
 
     unregister_backup_owner(
         store,
@@ -1369,6 +1461,22 @@ async def backup_delete(interaction: discord.Interaction, load_id: str) -> None:
     del store["backups"][load_id]
     save_backup_store(store)
     await interaction.response.send_message(embed=make_embed("Deleted", f"Removed `{load_id}`.", EMBED_OK), ephemeral=True)
+
+
+@backup_load.autocomplete("load_id")
+async def backup_load_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    return await user_backup_id_autocomplete(interaction, current)
+
+
+@backup_delete.autocomplete("load_id")
+async def backup_delete_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    return await user_backup_id_autocomplete(interaction, current)
 
 
 @bot.tree.command(name="backupcreate", description="Alias of /backup create")
@@ -1381,6 +1489,20 @@ async def backupcreate_alias(interaction: discord.Interaction, source_guild_id: 
 @app_commands.default_permissions(administrator=True)
 async def backupload_alias(interaction: discord.Interaction, load_id: str, target_guild_id: int | None = None) -> None:
     await backup_load.callback(interaction, load_id, target_guild_id)
+
+
+@backupload_alias.autocomplete("load_id")
+async def backupload_alias_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    return await user_backup_id_autocomplete(interaction, current)
+
+
+@bot.tree.command(name="backuplist", description="Alias of /backup list")
+@app_commands.default_permissions(administrator=True)
+async def backuplist_alias(interaction: discord.Interaction) -> None:
+    await backup_list.callback(interaction)
 
 
 @bot.tree.command(name="restore_missing", description="Restore only missing categories/channels from source")

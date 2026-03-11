@@ -20,6 +20,7 @@ start.bat
 - `/backup delete`
 - `/backupcreate` (alias)
 - `/backupload` (alias)
+- `/backuplist` (alias)
 - `/restore_missing`
 - `/cleantoday`
 - `/masschannels`

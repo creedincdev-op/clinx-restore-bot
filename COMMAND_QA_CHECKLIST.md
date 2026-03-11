@@ -21,6 +21,8 @@ Status legend:
   Expected: same behavior as `/backup create`.
 - [ ] `/backupload`
   Expected: same behavior as `/backup load`.
+- [ ] `/backuplist`
+  Expected: same behavior as `/backup list`, scoped only to the caller's own backups.
 
 ## Restore / Cleanup
 
