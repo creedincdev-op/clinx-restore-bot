@@ -12,7 +12,7 @@ Status legend:
 - [ ] `/backup create`
   Expected: returns a new load ID and source guild info.
 - [ ] `/backup load`
-  Expected: opens action selector, then applies selected restore steps and returns summary stats.
+  Expected: opens the backup load planner with live impact preview, action toggle buttons, detail mode, and in-place completion status.
 - [ ] `/backup list`
   Expected: shows saved backup IDs.
 - [ ] `/backup delete`

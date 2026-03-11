@@ -180,6 +180,21 @@ class LayoutLine:
 COMMAND_PAGE_SIZE = 5
 LIBRARY_ACCENT = 0x5B7CFF
 SUGGESTION_ACCENT = 0x39D0C8
+BACKUP_PLANNER_ACCENT = 0xF4C542
+BACKUP_ACTION_ORDER = (
+    "delete_roles",
+    "delete_channels",
+    "load_roles",
+    "load_channels",
+    "load_settings",
+)
+BACKUP_ACTION_LABELS = {
+    "delete_roles": "Delete Roles",
+    "delete_channels": "Delete Channels",
+    "load_roles": "Load Roles",
+    "load_channels": "Load Channels",
+    "load_settings": "Load Settings",
+}
 COMMAND_LIBRARY: dict[str, list[LibraryCommand]] = {
     "Backup": [
         LibraryCommand("backup create", "Create a fresh server backup and return its load ID.", "Snapshots the selected source guild, stores it in the CLINX backup DB, and tags the creator in the backup record."),
@@ -795,48 +810,248 @@ async def create_mass_channels_from_layout(
     return result
 
 
-class LoadActionSelect(discord.ui.Select):
-    def __init__(self, parent_view: "LoadConfirmView") -> None:
-        self.parent_view = parent_view
-        options = [
-            discord.SelectOption(label="Delete Roles", description="All existing roles will be deleted", value="delete_roles"),
-            discord.SelectOption(label="Delete Channels", description="All existing channels will be deleted", value="delete_channels"),
-            discord.SelectOption(label="Load Roles", description="Roles from backup will be loaded", value="load_roles", default=True),
-            discord.SelectOption(label="Load Channels", description="Channels from backup will be loaded", value="load_channels", default=True),
-            discord.SelectOption(label="Load Settings", description="Server settings will be updated", value="load_settings", default=True),
-        ]
-        super().__init__(placeholder="Select actions to perform", min_values=1, max_values=len(options), options=options)
+def build_backup_plan_preview(snapshot: dict[str, Any], target: discord.Guild, selected_actions: set[str]) -> dict[str, int]:
+    target_roles = [role for role in target.roles if not role.managed and not role.is_default()]
+    target_channels = list(target.channels)
+    snapshot_roles = snapshot.get("roles", [])
+    snapshot_categories = snapshot.get("categories", [])
+    snapshot_channels = snapshot.get("channels", [])
 
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.parent_view.author_id:
-            await interaction.response.send_message("Only the command user can change this menu.", ephemeral=True)
-            return
-        self.parent_view.selected_actions = set(self.values)
-        await interaction.response.defer()
+    delete_roles_enabled = "delete_roles" in selected_actions
+    delete_channels_enabled = "delete_channels" in selected_actions
+    load_roles_enabled = "load_roles" in selected_actions
+    load_channels_enabled = "load_channels" in selected_actions
+
+    preview = {
+        "deleted_roles": len(target_roles) if delete_roles_enabled else 0,
+        "deleted_channels": len(target_channels) if delete_channels_enabled else 0,
+        "created_roles": 0,
+        "updated_roles": 0,
+        "created_categories": 0,
+        "created_channels": 0,
+        "updated_channels": 0,
+        "updated_settings": 1 if "load_settings" in selected_actions else 0,
+        "conflicting_channels": 0,
+    }
+
+    if load_roles_enabled:
+        if delete_roles_enabled:
+            preview["created_roles"] = len(snapshot_roles)
+        else:
+            for role_data in snapshot_roles:
+                existing = discord.utils.get(target.roles, name=role_data["name"])
+                if existing is None:
+                    preview["created_roles"] += 1
+                else:
+                    preview["updated_roles"] += 1
+
+    if load_channels_enabled:
+        if delete_channels_enabled:
+            preview["created_categories"] = len(snapshot_categories)
+            preview["created_channels"] = len(snapshot_channels)
+        else:
+            existing_categories = {category.name for category in target.categories}
+            existing_channels = {channel.name: channel for channel in target.channels}
+
+            for category_data in snapshot_categories:
+                if category_data["name"] not in existing_categories:
+                    preview["created_categories"] += 1
+
+            for channel_data in snapshot_channels:
+                existing = existing_channels.get(channel_data["name"])
+                if existing is None:
+                    preview["created_channels"] += 1
+                elif str(existing.type) == channel_data["type"]:
+                    preview["updated_channels"] += 1
+                else:
+                    preview["conflicting_channels"] += 1
+
+    return preview
 
 
-class LoadConfirmView(discord.ui.View):
-    def __init__(self, author_id: int, snapshot: dict[str, Any], target: discord.Guild):
-        super().__init__(timeout=180)
+def render_backup_plan_lines(plan: dict[str, int]) -> str:
+    lines: list[str] = []
+    label_map = {
+        "deleted_roles": "roles will be deleted",
+        "created_roles": "roles will be created",
+        "updated_roles": "roles will be updated",
+        "deleted_channels": "channels will be deleted",
+        "created_categories": "categories will be created",
+        "created_channels": "channels will be created",
+        "updated_channels": "channels will be updated",
+        "updated_settings": "server settings will be updated",
+        "conflicting_channels": "channel names have type conflicts",
+    }
+
+    for key in (
+        "deleted_roles",
+        "created_roles",
+        "updated_roles",
+        "deleted_channels",
+        "created_categories",
+        "created_channels",
+        "updated_channels",
+        "updated_settings",
+        "conflicting_channels",
+    ):
+        value = plan.get(key, 0)
+        if value:
+            lines.append(f"- **{value}** {label_map[key]}")
+
+    if not lines:
+        return "- No changes are currently selected."
+
+    return "\n".join(lines)
+
+
+def render_backup_detail_lines(snapshot: dict[str, Any], target: discord.Guild, selected_actions: set[str], plan: dict[str, int]) -> str:
+    selected = ", ".join(BACKUP_ACTION_LABELS[action] for action in BACKUP_ACTION_ORDER if action in selected_actions) or "No actions selected"
+    detail_lines = [
+        f"**Backup Source**\n`{snapshot.get('source_guild_name', 'Unknown Source')}`",
+        f"**Target Server**\n`{target.name}`",
+        f"**Selected Actions**\n{selected}",
+        f"**Snapshot Objects**\nRoles `{len(snapshot.get('roles', []))}` | Categories `{len(snapshot.get('categories', []))}` | Channels `{len(snapshot.get('channels', []))}`",
+    ]
+    if plan.get("conflicting_channels"):
+        detail_lines.append("**Heads Up**\nConflicting channel types were detected. Names that already exist with a different type will not auto-convert.")
+    return "\n\n".join(detail_lines)
+
+
+class BackupLoadActionButton(discord.ui.Button["BackupLoadPlannerView"]):
+    def __init__(
+        self,
+        *,
+        backup_id: str,
+        source_name: str,
+        author_id: int,
+        snapshot: dict[str, Any],
+        target: discord.Guild,
+        selected_actions: set[str],
+        detail_mode: bool,
+        action_key: str,
+    ) -> None:
+        is_selected = action_key in selected_actions
+        is_destructive = action_key.startswith("delete_")
+        style = discord.ButtonStyle.secondary
+        if is_selected and is_destructive:
+            style = discord.ButtonStyle.danger
+        elif is_selected:
+            style = discord.ButtonStyle.primary
+
+        row = 1 if action_key in {"delete_roles", "delete_channels", "load_roles"} else 2
+        super().__init__(label=BACKUP_ACTION_LABELS[action_key], style=style, row=row)
+        self.backup_id = backup_id
+        self.source_name = source_name
         self.author_id = author_id
         self.snapshot = snapshot
         self.target = target
-        self.selected_actions: set[str] = {"load_roles", "load_channels", "load_settings"}
-        self.add_item(LoadActionSelect(self))
+        self.selected_actions = set(selected_actions)
+        self.detail_mode = detail_mode
+        self.action_key = action_key
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+    async def callback(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("Only the command user can use these controls.", ephemeral=True)
-            return False
-        return True
+            return
 
-    @discord.ui.button(label="Continue", style=discord.ButtonStyle.success)
-    async def continue_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        for child in self.children:
-            child.disabled = True
+        next_actions = set(self.selected_actions)
+        if self.action_key in next_actions:
+            next_actions.remove(self.action_key)
+        else:
+            next_actions.add(self.action_key)
+
         await interaction.response.edit_message(
-            embed=make_embed("Applying Backup", "Working on selected actions...", EMBED_INFO, interaction),
-            view=self,
+            view=BackupLoadPlannerView(
+                backup_id=self.backup_id,
+                source_name=self.source_name,
+                author_id=self.author_id,
+                snapshot=self.snapshot,
+                target=self.target,
+                selected_actions=next_actions,
+                detail_mode=self.detail_mode,
+            )
+        )
+
+
+class BackupLoadDetailButton(discord.ui.Button["BackupLoadPlannerView"]):
+    def __init__(
+        self,
+        *,
+        backup_id: str,
+        source_name: str,
+        author_id: int,
+        snapshot: dict[str, Any],
+        target: discord.Guild,
+        selected_actions: set[str],
+        detail_mode: bool,
+    ) -> None:
+        super().__init__(
+            label="Hide Detail" if detail_mode else "View Detail",
+            style=discord.ButtonStyle.secondary,
+            row=2,
+        )
+        self.backup_id = backup_id
+        self.source_name = source_name
+        self.author_id = author_id
+        self.snapshot = snapshot
+        self.target = target
+        self.selected_actions = set(selected_actions)
+        self.detail_mode = detail_mode
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the command user can use these controls.", ephemeral=True)
+            return
+
+        await interaction.response.edit_message(
+            view=BackupLoadPlannerView(
+                backup_id=self.backup_id,
+                source_name=self.source_name,
+                author_id=self.author_id,
+                snapshot=self.snapshot,
+                target=self.target,
+                selected_actions=self.selected_actions,
+                detail_mode=not self.detail_mode,
+            )
+        )
+
+
+class BackupLoadContinueButton(discord.ui.Button["BackupLoadPlannerView"]):
+    def __init__(
+        self,
+        *,
+        backup_id: str,
+        source_name: str,
+        author_id: int,
+        snapshot: dict[str, Any],
+        target: discord.Guild,
+        selected_actions: set[str],
+    ) -> None:
+        super().__init__(
+            label="Continue",
+            style=discord.ButtonStyle.success,
+            disabled=not selected_actions,
+            row=3,
+        )
+        self.backup_id = backup_id
+        self.source_name = source_name
+        self.author_id = author_id
+        self.snapshot = snapshot
+        self.target = target
+        self.selected_actions = set(selected_actions)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the command user can use these controls.", ephemeral=True)
+            return
+
+        await interaction.response.edit_message(
+            view=BackupLoadStatusView(
+                title="## `!` Applying Backup",
+                subtitle=f"Backup `{self.backup_id}` is now being applied to `{self.target.name}`.",
+                body="CLINX is pacing every action to avoid slamming Discord while roles, channels, and settings are updated.",
+                accent_color=LIBRARY_ACCENT,
+            )
         )
 
         try:
@@ -851,39 +1066,152 @@ class LoadConfirmView(discord.ui.View):
                 create_only_missing=False,
             )
         except Exception as exc:
-            await interaction.followup.send(
-                embed=make_embed("Backup Load Failed", f"Error: `{exc}`", EMBED_ERR, interaction),
-                ephemeral=True,
+            await interaction.edit_original_response(
+                view=BackupLoadStatusView(
+                    title="## `x` Backup Load Failed",
+                    subtitle=f"Backup `{self.backup_id}` did not finish cleanly.",
+                    body=f"`{exc}`",
+                    accent_color=EMBED_ERR,
+                )
             )
-            self.stop()
             return
 
-        summary = (
-            f"Deleted roles: `{stats['deleted_roles']}`\n"
-            f"Deleted channels: `{stats['deleted_channels']}`\n"
-            f"Created roles: `{stats['created_roles']}`\n"
-            f"Updated roles: `{stats['updated_roles']}`\n"
-            f"Created categories: `{stats['created_categories']}`\n"
-            f"Created channels: `{stats['created_channels']}`\n"
-            f"Updated channels: `{stats['updated_channels']}`\n"
-            f"Updated settings: `{stats['updated_settings']}`"
+        result_body = (
+            f"- **{stats['deleted_roles']}** roles deleted\n"
+            f"- **{stats['created_roles']}** roles created\n"
+            f"- **{stats['updated_roles']}** roles updated\n"
+            f"- **{stats['deleted_channels']}** channels deleted\n"
+            f"- **{stats['created_categories']}** categories created\n"
+            f"- **{stats['created_channels']}** channels created\n"
+            f"- **{stats['updated_channels']}** channels updated\n"
+            f"- **{stats['updated_settings']}** settings updated"
         )
-        await interaction.followup.send(
-            embed=make_embed("Backup Load Complete", summary, EMBED_OK, interaction),
-            ephemeral=True,
+        await interaction.edit_original_response(
+            view=BackupLoadStatusView(
+                title="## `<>` Backup Load Complete",
+                subtitle=f"Backup `{self.backup_id}` finished for `{self.target.name}`.",
+                body=result_body,
+                accent_color=EMBED_OK,
+            )
         )
-        self.stop()
-    async def on_timeout(self) -> None:
-        for child in self.children:
-            child.disabled = True
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
-    async def cancel_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+
+class BackupLoadCancelButton(discord.ui.Button["BackupLoadPlannerView"]):
+    def __init__(self) -> None:
+        super().__init__(label="Cancel", style=discord.ButtonStyle.danger, row=3)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.edit_message(
-            embed=make_embed("Cancelled", "Backup load was cancelled.", EMBED_WARN, interaction),
-            view=None,
+            view=BackupLoadStatusView(
+                title="## `-` Backup Load Cancelled",
+                subtitle="No changes were applied.",
+                body="Re-run `/backup load` whenever you want to reopen the planner.",
+                accent_color=EMBED_WARN,
+            )
         )
-        self.stop()
+
+
+class BackupLoadStatusView(discord.ui.LayoutView):
+    def __init__(self, *, title: str, subtitle: str, body: str, accent_color: int) -> None:
+        super().__init__(timeout=300)
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(title),
+                discord.ui.TextDisplay(subtitle),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(body),
+                accent_color=accent_color,
+            )
+        )
+
+
+class BackupLoadPlannerView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        *,
+        backup_id: str,
+        source_name: str,
+        author_id: int,
+        snapshot: dict[str, Any],
+        target: discord.Guild,
+        selected_actions: set[str] | None = None,
+        detail_mode: bool = False,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.backup_id = backup_id
+        self.source_name = source_name
+        self.author_id = author_id
+        self.snapshot = snapshot
+        self.target = target
+        self.selected_actions = set(selected_actions or {"load_roles", "load_channels", "load_settings"})
+        self.detail_mode = detail_mode
+
+        plan = build_backup_plan_preview(snapshot, target, self.selected_actions)
+        selected_count = len(self.selected_actions)
+        selected_labels = ", ".join(BACKUP_ACTION_LABELS[action] for action in BACKUP_ACTION_ORDER if action in self.selected_actions) or "No actions selected"
+
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay("## `!` Backup Load Planner"),
+                discord.ui.TextDisplay(
+                    f"Backup `{backup_id}` from `{source_name}` is staged for `{target.name}`. Review the impact below before you continue."
+                ),
+                discord.ui.Separator(),
+                discord.ui.Section(
+                    discord.ui.TextDisplay(f"**Selected Actions**\n{selected_labels}"),
+                    discord.ui.TextDisplay(f"**Impact Preview**\n{render_backup_plan_lines(plan)}"),
+                    accessory=discord.ui.Button(
+                        label=f"{selected_count} active",
+                        style=discord.ButtonStyle.secondary,
+                        disabled=True,
+                    ),
+                ),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(
+                    render_backup_detail_lines(snapshot, target, self.selected_actions, plan)
+                    if self.detail_mode
+                    else "Toggle `View Detail` to inspect the source, target, and conflict notes before you run the load."
+                ),
+                accent_color=BACKUP_PLANNER_ACCENT,
+            )
+        )
+
+        for action_key in BACKUP_ACTION_ORDER:
+            self.add_item(
+                BackupLoadActionButton(
+                    backup_id=backup_id,
+                    source_name=source_name,
+                    author_id=author_id,
+                    snapshot=snapshot,
+                    target=target,
+                    selected_actions=self.selected_actions,
+                    detail_mode=detail_mode,
+                    action_key=action_key,
+                )
+            )
+
+        self.add_item(
+            BackupLoadDetailButton(
+                backup_id=backup_id,
+                source_name=source_name,
+                author_id=author_id,
+                snapshot=snapshot,
+                target=target,
+                selected_actions=self.selected_actions,
+                detail_mode=detail_mode,
+            )
+        )
+        self.add_item(
+            BackupLoadContinueButton(
+                backup_id=backup_id,
+                source_name=source_name,
+                author_id=author_id,
+                snapshot=snapshot,
+                target=target,
+                selected_actions=self.selected_actions,
+            )
+        )
+        self.add_item(BackupLoadCancelButton())
 
 
 intents = discord.Intents.default()
@@ -996,12 +1324,14 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
         await interaction.followup.send(embed=make_embed("Error", "Target guild not found.", EMBED_ERR), ephemeral=True)
         return
 
-    warning = (
-        "Select what CLINX should load from this backup.\n"
-        "Use the menu, then press Continue."
+    view = BackupLoadPlannerView(
+        backup_id=load_id,
+        source_name=record.get("source_guild_name", "Unknown Source"),
+        author_id=interaction.user.id,
+        snapshot=record["snapshot"],
+        target=target,
     )
-    view = LoadConfirmView(interaction.user.id, record["snapshot"], target)
-    await interaction.followup.send(embed=make_embed("Warning", warning, EMBED_WARN), view=view, ephemeral=True)
+    await interaction.followup.send(view=view, ephemeral=True)
 
 
 @backup_group.command(name="list", description="List saved backup IDs")
