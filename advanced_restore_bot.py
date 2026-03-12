@@ -259,13 +259,13 @@ class LayoutLine:
 COMMAND_PAGE_SIZE = 5
 LIBRARY_ACCENT = 0x5B7CFF
 SUGGESTION_ACCENT = 0x39D0C8
-BACKUP_PLANNER_ACCENT = 0xF4C542
+BACKUP_PLANNER_ACCENT = 0x6CCBFF
 BACKUP_ACTION_ORDER = (
-    "delete_roles",
-    "delete_channels",
     "load_roles",
     "load_channels",
     "load_settings",
+    "delete_roles",
+    "delete_channels",
 )
 BACKUP_ACTION_LABELS = {
     "delete_roles": "Delete Roles",
@@ -273,6 +273,10 @@ BACKUP_ACTION_LABELS = {
     "load_roles": "Load Roles",
     "load_channels": "Load Channels",
     "load_settings": "Load Settings",
+}
+BACKUP_DELETE_DEPENDENCIES = {
+    "delete_roles": "load_roles",
+    "delete_channels": "load_channels",
 }
 COMMAND_LIBRARY: dict[str, list[LibraryCommand]] = {
     "Backup": [
@@ -952,15 +956,15 @@ def build_backup_plan_preview(snapshot: dict[str, Any], target: discord.Guild, s
 def render_backup_plan_lines(plan: dict[str, int]) -> str:
     lines: list[str] = []
     label_map = {
-        "deleted_roles": "roles will be deleted",
-        "created_roles": "roles will be created",
-        "updated_roles": "roles will be updated",
-        "deleted_channels": "channels will be deleted",
-        "created_categories": "categories will be created",
-        "created_channels": "channels will be created",
-        "updated_channels": "channels will be updated",
-        "updated_settings": "server settings will be updated",
-        "conflicting_channels": "channel names have type conflicts",
+        "deleted_roles": "live roles cleared before rebuild",
+        "created_roles": "roles created from backup",
+        "updated_roles": "roles updated in place",
+        "deleted_channels": "live channels cleared before rebuild",
+        "created_categories": "categories created",
+        "created_channels": "channels created",
+        "updated_channels": "channels updated in place",
+        "updated_settings": "server profile synced",
+        "conflicting_channels": "channel type conflicts need review",
     }
 
     for key in (
@@ -976,24 +980,73 @@ def render_backup_plan_lines(plan: dict[str, int]) -> str:
     ):
         value = plan.get(key, 0)
         if value:
-            lines.append(f"- **{value}** {label_map[key]}")
+            lines.append(f"• **{value}** {label_map[key]}")
 
     if not lines:
-        return "- No changes are currently selected."
+        return "• No restore lanes are armed yet."
 
     return "\n".join(lines)
 
 
+def normalize_backup_actions(selected_actions: set[str]) -> set[str]:
+    normalized = set(selected_actions)
+    for delete_action, load_action in BACKUP_DELETE_DEPENDENCIES.items():
+        if load_action not in normalized:
+            normalized.discard(delete_action)
+    return normalized
+
+
+def is_backup_action_available(selected_actions: set[str], action_key: str) -> bool:
+    required = BACKUP_DELETE_DEPENDENCIES.get(action_key)
+    if required is None:
+        return True
+    return required in selected_actions
+
+
+def render_backup_lane_lines(selected_actions: set[str]) -> str:
+    lines: list[str] = []
+    if "load_roles" in selected_actions:
+        role_mode = "replace the live role stack from backup" if "delete_roles" in selected_actions else "merge backup roles into the live stack"
+        lines.append(f"• **Roles Lane**: {role_mode}")
+    if "load_channels" in selected_actions:
+        channel_mode = "wipe the live channel tree, then rebuild from backup" if "delete_channels" in selected_actions else "create and update the channel tree from backup"
+        lines.append(f"• **Channels Lane**: {channel_mode}")
+    if "load_settings" in selected_actions:
+        lines.append("• **Settings Lane**: sync guild profile and server configuration")
+    if not lines:
+        return "• No restore lanes are armed."
+    return "\n".join(lines)
+
+
+def render_backup_guardrail_lines(selected_actions: set[str]) -> str:
+    lines: list[str] = []
+    if "load_roles" not in selected_actions:
+        lines.append("• `Delete Roles` unlocks only after `Load Roles` is enabled.")
+    elif "delete_roles" in selected_actions:
+        lines.append("• Roles will be wiped first, then rebuilt from the backup snapshot.")
+
+    if "load_channels" not in selected_actions:
+        lines.append("• `Delete Channels` unlocks only after `Load Channels` is enabled.")
+    elif "delete_channels" in selected_actions:
+        lines.append("• Channels will be wiped first, then the backup layout will be rebuilt.")
+
+    if not lines:
+        if all(load_action in selected_actions for load_action in BACKUP_DELETE_DEPENDENCIES.values()):
+            lines.append("• Matching rebuild lanes are armed. Optional wipe lanes are now available if you want a full replace instead of a merge.")
+        else:
+            lines.append("• Destructive wipes stay locked until a matching rebuild lane is armed.")
+    return "\n".join(lines)
+
+
 def render_backup_detail_lines(snapshot: dict[str, Any], target: discord.Guild, selected_actions: set[str], plan: dict[str, int]) -> str:
-    selected = ", ".join(BACKUP_ACTION_LABELS[action] for action in BACKUP_ACTION_ORDER if action in selected_actions) or "No actions selected"
     detail_lines = [
-        f"**Backup Source**\n`{snapshot.get('source_guild_name', 'Unknown Source')}`",
+        f"**Source Server**\n`{snapshot.get('source_guild_name', 'Unknown Source')}`",
         f"**Target Server**\n`{target.name}`",
-        f"**Selected Actions**\n{selected}",
-        f"**Snapshot Objects**\nRoles `{len(snapshot.get('roles', []))}` | Categories `{len(snapshot.get('categories', []))}` | Channels `{len(snapshot.get('channels', []))}`",
+        f"**Restore Lanes**\n{render_backup_lane_lines(selected_actions)}",
+        f"**Snapshot Scope**\nRoles `{len(snapshot.get('roles', []))}` | Categories `{len(snapshot.get('categories', []))}` | Channels `{len(snapshot.get('channels', []))}`",
     ]
     if plan.get("conflicting_channels"):
-        detail_lines.append("**Heads Up**\nConflicting channel types were detected. Names that already exist with a different type will not auto-convert.")
+        detail_lines.append("**Conflict Watch**\nSome existing channel names already use a different channel type. CLINX will not auto-convert those lanes.")
     return "\n\n".join(detail_lines)
 
 
@@ -1010,21 +1063,23 @@ class BackupLoadActionButton(discord.ui.Button["BackupLoadPlannerView"]):
         detail_mode: bool,
         action_key: str,
     ) -> None:
-        is_selected = action_key in selected_actions
+        normalized_actions = normalize_backup_actions(selected_actions)
+        is_selected = action_key in normalized_actions
         is_destructive = action_key.startswith("delete_")
+        is_available = is_backup_action_available(normalized_actions, action_key)
         style = discord.ButtonStyle.secondary
         if is_selected and is_destructive:
             style = discord.ButtonStyle.danger
         elif is_selected:
             style = discord.ButtonStyle.primary
 
-        super().__init__(label=BACKUP_ACTION_LABELS[action_key], style=style)
+        super().__init__(label=BACKUP_ACTION_LABELS[action_key], style=style, disabled=not is_available)
         self.backup_id = backup_id
         self.source_name = source_name
         self.author_id = author_id
         self.snapshot = snapshot
         self.target = target
-        self.selected_actions = set(selected_actions)
+        self.selected_actions = normalized_actions
         self.detail_mode = detail_mode
         self.action_key = action_key
 
@@ -1038,6 +1093,7 @@ class BackupLoadActionButton(discord.ui.Button["BackupLoadPlannerView"]):
             next_actions.remove(self.action_key)
         else:
             next_actions.add(self.action_key)
+        next_actions = normalize_backup_actions(next_actions)
 
         await interaction.response.edit_message(
             view=BackupLoadPlannerView(
@@ -1124,10 +1180,10 @@ class BackupLoadContinueButton(discord.ui.Button["BackupLoadPlannerView"]):
 
         await interaction.response.edit_message(
             view=BackupLoadStatusView(
-                title="## `!` Applying Backup",
-                subtitle=f"Backup `{self.backup_id}` is now being applied to `{self.target.name}`.",
-                body="CLINX is pacing every action to avoid slamming Discord while roles, channels, and settings are updated.",
-                accent_color=LIBRARY_ACCENT,
+                title="## `<>` Applying Backup",
+                subtitle=f"CLINX is rebuilding `{self.target.name}` from backup `{self.backup_id}`.",
+                body="Write pacing is active. Roles, channels, and server settings are being restored in a controlled sequence to avoid Discord rate spikes.",
+                accent_color=BACKUP_PLANNER_ACCENT,
             )
         )
 
@@ -1154,19 +1210,19 @@ class BackupLoadContinueButton(discord.ui.Button["BackupLoadPlannerView"]):
             return
 
         result_body = (
-            f"- **{stats['deleted_roles']}** roles deleted\n"
-            f"- **{stats['created_roles']}** roles created\n"
-            f"- **{stats['updated_roles']}** roles updated\n"
-            f"- **{stats['deleted_channels']}** channels deleted\n"
-            f"- **{stats['created_categories']}** categories created\n"
-            f"- **{stats['created_channels']}** channels created\n"
-            f"- **{stats['updated_channels']}** channels updated\n"
-            f"- **{stats['updated_settings']}** settings updated"
+            f"• **{stats['deleted_roles']}** roles deleted\n"
+            f"• **{stats['created_roles']}** roles created\n"
+            f"• **{stats['updated_roles']}** roles updated\n"
+            f"• **{stats['deleted_channels']}** channels deleted\n"
+            f"• **{stats['created_categories']}** categories created\n"
+            f"• **{stats['created_channels']}** channels created\n"
+            f"• **{stats['updated_channels']}** channels updated\n"
+            f"• **{stats['updated_settings']}** settings synced"
         )
         await interaction.edit_original_response(
             view=BackupLoadStatusView(
-                title="## `<>` Backup Load Complete",
-                subtitle=f"Backup `{self.backup_id}` finished for `{self.target.name}`.",
+                title="## `<>` Backup Rebuild Complete",
+                subtitle=f"`{self.target.name}` now matches the selected lanes from backup `{self.backup_id}`.",
                 body=result_body,
                 accent_color=EMBED_OK,
             )
@@ -1180,7 +1236,7 @@ class BackupLoadCancelButton(discord.ui.Button["BackupLoadPlannerView"]):
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.edit_message(
             view=BackupLoadStatusView(
-                title="## `-` Backup Load Cancelled",
+                title="## `-` Backup Plan Cancelled",
                 subtitle="No changes were applied.",
                 body="Re-run `/backup load` whenever you want to reopen the planner.",
                 accent_color=EMBED_WARN,
@@ -1220,36 +1276,84 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
         self.author_id = author_id
         self.snapshot = snapshot
         self.target = target
-        self.selected_actions = set(selected_actions or {"load_roles", "load_channels", "load_settings"})
+        self.selected_actions = normalize_backup_actions(set(selected_actions or {"load_roles", "load_channels", "load_settings"}))
         self.detail_mode = detail_mode
 
         plan = build_backup_plan_preview(snapshot, target, self.selected_actions)
         selected_count = len(self.selected_actions)
-        selected_labels = ", ".join(BACKUP_ACTION_LABELS[action] for action in BACKUP_ACTION_ORDER if action in self.selected_actions) or "No actions selected"
+        run_mode_label = "Wipe + Rebuild" if any(action in self.selected_actions for action in BACKUP_DELETE_DEPENDENCIES) else "Rebuild Only"
+        detail_block = (
+            render_backup_detail_lines(snapshot, target, self.selected_actions, plan)
+            if self.detail_mode
+            else "**Detail View**\nOpen `View Detail` to inspect the source server, target server, and conflict notes before you run the load."
+        )
 
         self.add_item(
             discord.ui.Container(
-                discord.ui.TextDisplay("## `!` Backup Load Planner"),
+                discord.ui.TextDisplay("## `<>` Backup Load Planner"),
                 discord.ui.TextDisplay(
-                    f"Backup `{backup_id}` from `{source_name}` is staged for `{target.name}`. Review the impact below before you continue."
+                    "Stage a controlled rebuild before CLINX touches the live server. Wipe lanes stay locked until their matching rebuild lanes are armed."
                 ),
                 discord.ui.Separator(),
                 discord.ui.Section(
-                    discord.ui.TextDisplay(f"**Selected Actions**\n{selected_labels}"),
-                    discord.ui.TextDisplay(f"**Impact Preview**\n{render_backup_plan_lines(plan)}"),
+                    discord.ui.TextDisplay(f"**Backup Vault**\n`{backup_id}`"),
+                    discord.ui.TextDisplay(f"**Route**\n`{source_name}` -> `{target.name}`"),
                     accessory=discord.ui.Button(
-                        label=f"{selected_count} active",
+                        label=f"{selected_count} staged",
                         style=discord.ButtonStyle.secondary,
                         disabled=True,
                     ),
                 ),
                 discord.ui.Separator(),
-                discord.ui.TextDisplay(
-                    render_backup_detail_lines(snapshot, target, self.selected_actions, plan)
-                    if self.detail_mode
-                    else "Toggle `View Detail` to inspect the source, target, and conflict notes before you run the load."
+                discord.ui.Section(
+                    discord.ui.TextDisplay(f"**Restore Lanes**\n{render_backup_lane_lines(self.selected_actions)}"),
+                    discord.ui.TextDisplay(f"**Projected Changes**\n{render_backup_plan_lines(plan)}"),
+                    accessory=discord.ui.Button(
+                        label=run_mode_label,
+                        style=discord.ButtonStyle.secondary,
+                        disabled=True,
+                    ),
                 ),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(f"**Safety Locks**\n{render_backup_guardrail_lines(self.selected_actions)}"),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(detail_block),
                 accent_color=BACKUP_PLANNER_ACCENT,
+            )
+        )
+
+        self.add_item(
+            discord.ui.ActionRow(
+                BackupLoadActionButton(
+                    backup_id=backup_id,
+                    source_name=source_name,
+                    author_id=author_id,
+                    snapshot=snapshot,
+                    target=target,
+                    selected_actions=self.selected_actions,
+                    detail_mode=detail_mode,
+                    action_key="load_roles",
+                ),
+                BackupLoadActionButton(
+                    backup_id=backup_id,
+                    source_name=source_name,
+                    author_id=author_id,
+                    snapshot=snapshot,
+                    target=target,
+                    selected_actions=self.selected_actions,
+                    detail_mode=detail_mode,
+                    action_key="load_channels",
+                ),
+                BackupLoadActionButton(
+                    backup_id=backup_id,
+                    source_name=source_name,
+                    author_id=author_id,
+                    snapshot=snapshot,
+                    target=target,
+                    selected_actions=self.selected_actions,
+                    detail_mode=detail_mode,
+                    action_key="load_settings",
+                ),
             )
         )
 
@@ -1274,41 +1378,6 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
                     selected_actions=self.selected_actions,
                     detail_mode=detail_mode,
                     action_key="delete_channels",
-                ),
-                BackupLoadActionButton(
-                    backup_id=backup_id,
-                    source_name=source_name,
-                    author_id=author_id,
-                    snapshot=snapshot,
-                    target=target,
-                    selected_actions=self.selected_actions,
-                    detail_mode=detail_mode,
-                    action_key="load_roles",
-                ),
-            )
-        )
-
-        self.add_item(
-            discord.ui.ActionRow(
-                BackupLoadActionButton(
-                    backup_id=backup_id,
-                    source_name=source_name,
-                    author_id=author_id,
-                    snapshot=snapshot,
-                    target=target,
-                    selected_actions=self.selected_actions,
-                    detail_mode=detail_mode,
-                    action_key="load_channels",
-                ),
-                BackupLoadActionButton(
-                    backup_id=backup_id,
-                    source_name=source_name,
-                    author_id=author_id,
-                    snapshot=snapshot,
-                    target=target,
-                    selected_actions=self.selected_actions,
-                    detail_mode=detail_mode,
-                    action_key="load_settings",
                 ),
                 BackupLoadDetailButton(
                     backup_id=backup_id,
