@@ -4,10 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CLINX Features | Recovery, Safety Gate, and Approvals</title>
-  <meta name="description" content="Scan CLINX recovery, safety tiers, owner approvals, and command access in one compact Features page." />
+  <meta name="description" content="Scan CLINX recovery, trust gates, owner approvals, and command access in one compact operator page." />
   <meta name="theme-color" content="#081120" />
   <meta property="og:title" content="CLINX Features" />
-  <meta property="og:description" content="Recovery, Safety Gate, Owner Approval, and Command Access in one compact page." />
+  <meta property="og:description" content="Selective recovery, deletion lock, owner approval, and protected command access in one cleaner page." />
   <meta property="og:type" content="website" />
   <meta name="twitter:card" content="summary_large_image" />
   <link rel="canonical" href="/features" />
@@ -26,6 +26,7 @@
 
         <nav class="nav-links" aria-label="Primary">
           <a href="/features" aria-current="page">Features</a>
+          <a href="/resources" data-page-transition="true">Resources</a>
           <a href="/#premium" data-section-link="premium" data-page-transition="true">Plans</a>
           <a href="/#faq" data-section-link="faq" data-page-transition="true">FAQ</a>
           <a href="/#legal" data-section-link="legal" data-page-transition="true">Legal</a>
@@ -49,6 +50,7 @@
       <div class="container mobile-menu" id="mobile-menu" hidden>
         <nav class="mobile-links" aria-label="Mobile">
           <a href="/features">Features</a>
+          <a href="/resources" data-page-transition="true">Resources</a>
           <a href="/#premium" data-section-link="premium" data-page-transition="true">Plans</a>
           <a href="/#faq" data-section-link="faq" data-page-transition="true">FAQ</a>
           <a href="/#legal" data-section-link="legal" data-page-transition="true">Legal</a>
@@ -61,18 +63,60 @@
     </header>
 
     <main id="content">
-      <section class="container hero feature-hero fade show">
+      <section class="container hero feature-showcase fade show">
         <div class="hero-copy">
-          <div class="eyebrow">Compact product breakdown</div>
-          <h1>Everything CLINX does, <span>without the wall of text.</span></h1>
-          <p>
-            CLINX combines selective recovery, trust-gated execution, owner approvals, and bulk rebuild tools in one admin-safe flow.
-          </p>
+          <div class="eyebrow">Scan-first operator view</div>
+          <h1>CLINX features, <span>compressed into the parts that matter.</span></h1>
+          <p>Selective loads, deletion lock, owner approval, and bulk rebuild tools are split into short layers so admins can understand the stack fast.</p>
           <div class="feature-kicker">
             <span class="chip">Selective load</span>
             <span class="chip">Deletion lock</span>
             <span class="chip">Owner approval</span>
             <span class="chip">Bulk rebuilds</span>
+            <span class="chip">Trust-gated runtime</span>
+          </div>
+          <div class="hero-actions">
+            <a class="btn primary" href="https://discord.com/oauth2/authorize?client_id=1478668338367434833&permissions=8&integration_type=0&scope=bot+applications.commands" target="_blank" rel="noreferrer">Add CLINX</a>
+            <a class="btn" href="/resources" data-page-transition="true">Open Resources</a>
+          </div>
+        </div>
+
+        <div class="hero-visual feature-visual">
+          <div class="hero-panel glide">
+            <div class="panel-top">
+              <span class="d r"></span>
+              <span class="d y"></span>
+              <span class="d g"></span>
+              <span class="panel-title">clinx://protected-run</span>
+            </div>
+            <div class="panel-body">
+              <div class="line"><span class="cmd">/restore_missing</span> -> requested by admin-two</div>
+              <div class="line"><span class="warn">Safety Gate:</span> requester is untrusted</div>
+              <div class="line">Approval card posted in-channel and tagged to owner</div>
+              <div class="line"><span class="ok">Frozen action set approved</span> -> run starts with exact selected lanes</div>
+            </div>
+          </div>
+          <div class="signal-grid">
+            <article class="signal-card">
+              <span class="signal-label">Tier Model</span>
+              <strong>0 to 4</strong>
+              <p>Public info to owner-only governance.</p>
+            </article>
+            <article class="signal-card">
+              <span class="signal-label">Approval</span>
+              <strong>2 min</strong>
+              <p>Protected requests expire if the owner does nothing.</p>
+            </article>
+            <article class="signal-card">
+              <span class="signal-label">Safety</span>
+              <strong>Deletion lock</strong>
+              <p>Live channels and roles stay guarded until an approved load changes them.</p>
+            </article>
+            <article class="signal-card">
+              <span class="signal-label">Pacing</span>
+              <strong>Throttled</strong>
+              <p>Bulk writes stay on the same protected dispatch path.</p>
+            </article>
           </div>
         </div>
       </section>
@@ -82,9 +126,9 @@
           <div class="tab-shell">
             <div class="section-heading">
               <div>
-                <div class="eyebrow ghost">Operator view</div>
-                <h2 class="section-title">Choose the layer you care about.</h2>
-                <p class="section-sub">Each tab is built to scan fast and still show the important rules.</p>
+                <div class="eyebrow ghost">Feature breakdown</div>
+                <h2 class="section-title">Open the layer you need and ignore the rest.</h2>
+                <p class="section-sub">The page is denser on purpose: short cards, short flows, short command groupings.</p>
               </div>
               <a class="btn" href="/#premium" data-section-link="premium" data-page-transition="true">View Plans</a>
             </div>
@@ -92,6 +136,7 @@
             <div class="tab-row" role="tablist" aria-label="CLINX feature sections" data-tablist>
               <button class="tab" type="button" role="tab" aria-selected="true" aria-controls="panel-recovery" id="tab-recovery">Recovery</button>
               <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-safety" id="tab-safety">Safety Gate</button>
+              <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-workflows" id="tab-workflows">Workflows</button>
               <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-approval" id="tab-approval">Owner Approval</button>
               <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-command" id="tab-command">Command Access</button>
             </div>
@@ -100,34 +145,34 @@
               <section class="tab-panel" id="panel-recovery" role="tabpanel" aria-labelledby="tab-recovery">
                 <article class="panel-hero">
                   <span class="page-label">Recovery</span>
-                  <h3>Restore the exact lane you need.</h3>
-                  <p>CLINX is built for controlled recovery, not blind full-server resets.</p>
+                  <h3>Recover the broken lane without flattening the whole server.</h3>
+                  <p>CLINX is built around selective execution so fixes can stay targeted instead of destructive by default.</p>
                 </article>
-                <div class="panel-grid">
-                  <article class="feature-card">
+                <div class="panel-grid dense-grid">
+                  <article class="feature-card compact-card">
                     <h3>Selective Load</h3>
-                    <p>Apply only roles, channels, settings, or the exact lanes you want instead of flattening live state.</p>
+                    <p>Load channels, roles, settings, or mixed lanes exactly where the incident lives.</p>
                   </article>
-                  <article class="feature-card">
+                  <article class="feature-card compact-card">
                     <h3>Restore Missing</h3>
-                    <p>Patch missing structure without touching the parts of a server that are still healthy.</p>
+                    <p>Patch only missing structure while leaving healthy live content in place.</p>
                   </article>
-                  <article class="feature-card">
-                    <h3>Masschannels Parser</h3>
-                    <p>Turn pasted layouts into categories and channels fast when a rebuild needs momentum.</p>
+                  <article class="feature-card compact-card">
+                    <h3>Masschannels</h3>
+                    <p>Turn pasted layouts into fast rebuild structure for high-pressure incidents.</p>
                   </article>
-                  <article class="feature-card">
-                    <h3>Base Value</h3>
-                    <p>Core recovery control stays in the product while premium focuses on scale, depth, and speed.</p>
+                  <article class="feature-card compact-card">
+                    <h3>Base Product Value</h3>
+                    <p>More recovery control is available before premium. Paid plans focus on scale, depth, and cadence.</p>
                   </article>
                 </div>
                 <article class="feature-callout">
-                  <h3>What premium actually adds</h3>
-                  <p>Deeper history, richer sync, faster backup cadence, and bigger operating room for larger communities.</p>
+                  <h3>What CLINX tries to optimize</h3>
                   <div class="chip-row">
-                    <span class="chip">More backup depth</span>
-                    <span class="chip">Richer sync</span>
-                    <span class="chip">Faster cadence</span>
+                    <span class="chip">Less blind overwrite</span>
+                    <span class="chip">Faster rebuild path</span>
+                    <span class="chip">Safer protected runs</span>
+                    <span class="chip">Clearer operator intent</span>
                   </div>
                 </article>
               </section>
@@ -135,42 +180,77 @@
               <section class="tab-panel" id="panel-safety" role="tabpanel" aria-labelledby="tab-safety" hidden>
                 <article class="panel-hero">
                   <span class="page-label">Safety Gate</span>
-                  <h3>High-impact commands follow trust rules at runtime.</h3>
-                  <p>Discord admin permission alone is not the final key. CLINX adds its own safety layer on top.</p>
+                  <h3>Discord admin permission is not the final key.</h3>
+                  <p>CLINX adds its own runtime trust system so destructive power is separated from normal administrative access.</p>
                 </article>
-                <div class="tier-grid">
-                  <article class="tier-card"><h3>Tier 0</h3><p>Public info only.</p></article>
-                  <article class="tier-card"><h3>Tier 1</h3><p>Safe admin actions run directly.</p></article>
-                  <article class="tier-card"><h3>Tier 2</h3><p>High-impact but non-destructive actions need approval when untrusted.</p></article>
-                  <article class="tier-card"><h3>Tier 3</h3><p>Destructive actions stay behind stronger approval gates.</p></article>
-                  <article class="tier-card"><h3>Tier 4</h3><p>Owner-only governance commands.</p></article>
+                <div class="tier-grid tight-grid">
+                  <article class="tier-card compact-card"><h3>Tier 0</h3><p>Public info only.</p></article>
+                  <article class="tier-card compact-card"><h3>Tier 1</h3><p>Safe admin actions.</p></article>
+                  <article class="tier-card compact-card"><h3>Tier 2</h3><p>Approval when untrusted.</p></article>
+                  <article class="tier-card compact-card"><h3>Tier 3</h3><p>Destructive paths behind stronger gates.</p></article>
+                  <article class="tier-card compact-card"><h3>Tier 4</h3><p>Owner-only governance.</p></article>
                 </div>
                 <div class="role-grid">
-                  <article class="role-card">
+                  <article class="role-card compact-card">
                     <h3>Owner</h3>
-                    <p>The actual guild owner is fully trusted and can run all protected commands, including governance.</p>
+                    <p>The actual guild owner is always trusted and can approve or execute protected actions.</p>
                   </article>
-                  <article class="role-card">
+                  <article class="role-card compact-card">
                     <h3>Trusted Admin</h3>
-                    <p>Trusted admins can run Tier 2 and Tier 3 directly, but Tier 4 still stays owner-only.</p>
+                    <p>Runs Tier 2 and Tier 3 directly, but never bypasses owner-only governance.</p>
                   </article>
-                  <article class="role-card">
+                  <article class="role-card compact-card">
                     <h3>Untrusted Admin</h3>
-                    <p>Untrusted admins can request protected actions, but the owner decides with approve or deny buttons.</p>
+                    <p>Can request high-impact actions, but CLINX pauses the run for owner approval.</p>
                   </article>
                 </div>
                 <div class="guard-grid">
-                  <article class="guard-card">
+                  <article class="guard-card compact-card">
                     <h3>Deletion Lock</h3>
-                    <p>Channels and roles stay protected from normal admin deletion unless an approved load intentionally changes them.</p>
+                    <p>Roles and channels are protected from normal admin deletion unless an approved load is meant to change them.</p>
                   </article>
-                  <article class="guard-card">
-                    <h3>One Pending Request</h3>
-                    <p>Only one protected request can wait per guild, which keeps approvals clear and stops spam chains.</p>
+                  <article class="guard-card compact-card">
+                    <h3>Single Pending Request</h3>
+                    <p>One protected approval queue per guild keeps decision paths clean and prevents spam collisions.</p>
                   </article>
-                  <article class="guard-card">
-                    <h3>Central Pacing</h3>
-                    <p>Bulk write actions stay on the throttled dispatch path so fast restore runs do not bypass safety pacing.</p>
+                  <article class="guard-card compact-card">
+                    <h3>Central Dispatch Pacing</h3>
+                    <p>Protected bulk writes stay on the throttled path instead of using special fast lanes.</p>
+                  </article>
+                </div>
+              </section>
+
+              <section class="tab-panel" id="panel-workflows" role="tabpanel" aria-labelledby="tab-workflows" hidden>
+                <article class="panel-hero">
+                  <span class="page-label">Workflows</span>
+                  <h3>Three common routes cover most restore pressure.</h3>
+                  <p>Choose the route by blast radius, then let CLINX narrow or gate the action set.</p>
+                </article>
+                <div class="flow-grid">
+                  <article class="flow-card">
+                    <span class="step-index">Merge Route</span>
+                    <h3>Patch without deletes</h3>
+                    <p>Use load with delete toggles off when you want the backup to add and update, not wipe.</p>
+                  </article>
+                  <article class="flow-card">
+                    <span class="step-index">Missing Route</span>
+                    <h3>Recover only the gaps</h3>
+                    <p>Restore missing structures when the incident is partial and the live server is still usable.</p>
+                  </article>
+                  <article class="flow-card">
+                    <span class="step-index">Rebuild Route</span>
+                    <h3>Mass restore structure fast</h3>
+                    <p>Use backup loads or pasted layouts when a server needs a larger structural rebuild.</p>
+                  </article>
+                </div>
+                <div class="workflow-rail">
+                  <article class="workflow-note">
+                    <h3>Backup load behavior</h3>
+                    <p>Merge-only is treated as Tier 2. Delete-enabled loads move to Tier 3 and can require explicit owner approval.</p>
+                  </article>
+                  <article class="workflow-note">
+                    <h3>Protected planner</h3>
+                    <p>The private planner stays with the requester, but approved execution uses the exact frozen toggles selected at request time.</p>
                   </article>
                 </div>
               </section>
@@ -178,29 +258,29 @@
               <section class="tab-panel" id="panel-approval" role="tabpanel" aria-labelledby="tab-approval" hidden>
                 <article class="panel-hero">
                   <span class="page-label">Owner Approval</span>
-                  <h3>Protected actions become a live approval card instead of a silent execute.</h3>
-                  <p>The request is frozen at creation time, posted in the same channel, and only the server owner can decide.</p>
+                  <h3>Protected requests become visible cards, not silent actions.</h3>
+                  <p>When an untrusted admin requests a Tier 2 or Tier 3 command, CLINX turns it into an owner decision in the same channel.</p>
                 </article>
-                <div class="steps">
-                  <article class="step">
+                <div class="steps compact-steps">
+                  <article class="step compact-card">
                     <span class="step-index">Step 01</span>
                     <h3>Request</h3>
-                    <p>An untrusted admin starts a Tier 2 or Tier 3 action.</p>
+                    <p>Untrusted admin starts a protected action.</p>
                   </article>
-                  <article class="step">
+                  <article class="step compact-card">
                     <span class="step-index">Step 02</span>
-                    <h3>Owner Ping</h3>
-                    <p>CLINX posts a public approval card in the same channel and tags the actual guild owner.</p>
+                    <h3>Card Posted</h3>
+                    <p>Owner is tagged in the same channel where the request happened.</p>
                   </article>
-                  <article class="step">
+                  <article class="step compact-card">
                     <span class="step-index">Step 03</span>
-                    <h3>Frozen Plan</h3>
-                    <p>The selected route, toggles, and planned changes are locked before approval happens.</p>
+                    <h3>Payload Frozen</h3>
+                    <p>Route, selected lanes, and planned changes are locked before approval.</p>
                   </article>
-                  <article class="step">
+                  <article class="step compact-card">
                     <span class="step-index">Step 04</span>
-                    <h3>Run or Deny</h3>
-                    <p>Approve starts the action and updates status live. Deny or expiry does nothing.</p>
+                    <h3>Approve or Deny</h3>
+                    <p>Approve runs it. Deny or expiry leaves the server untouched.</p>
                   </article>
                 </div>
                 <article class="feature-callout">
@@ -209,8 +289,8 @@
                     <span class="chip">Same channel</span>
                     <span class="chip">Owner-only buttons</span>
                     <span class="chip">2 minute expiry</span>
-                    <span class="chip">Running / completed / failed</span>
-                    <span class="chip">Denied / expired states</span>
+                    <span class="chip">Denied and expired states</span>
+                    <span class="chip">Running status updates</span>
                   </div>
                 </article>
               </section>
@@ -218,61 +298,64 @@
               <section class="tab-panel" id="panel-command" role="tabpanel" aria-labelledby="tab-command" hidden>
                 <article class="panel-hero">
                   <span class="page-label">Command Access</span>
-                  <h3>Command groups stay readable because access follows the tier model.</h3>
-                  <p>Trusted admins bypass approval for Tier 2 and Tier 3. The owner bypasses all gates. Tier 4 stays owner-only.</p>
+                  <h3>Command groups stay compact because the access model does the heavy lifting.</h3>
+                  <p>Trusted admins bypass Tier 2 and Tier 3 approval. The owner bypasses all gates. Tier 4 stays owner-only.</p>
                 </article>
                 <div class="command-grid">
-                  <article class="command-card">
-                    <h3>Tier 0 - Public Info</h3>
-                    <div class="chip-row">
-                      <span class="chip"><code>/help</code></span>
-                      <span class="chip"><code>/invite</code></span>
+                  <article class="command-card compact-card">
+                    <h3>Tier 0</h3>
+                    <p>Public info commands.</p>
+                    <div class="command-token-row">
+                      <span class="command-token"><code>/help</code></span>
+                      <span class="command-token"><code>/invite</code></span>
                     </div>
                   </article>
-                  <article class="command-card">
-                    <h3>Tier 1 - Safe Admin</h3>
-                    <div class="chip-row">
-                      <span class="chip"><code>/backup create</code></span>
-                      <span class="chip"><code>/backup list</code></span>
-                      <span class="chip"><code>/backup delete</code></span>
-                      <span class="chip"><code>/backupcreate</code></span>
-                      <span class="chip"><code>/backuplist</code></span>
-                      <span class="chip"><code>/panel suggestion</code></span>
-                      <span class="chip">export commands</span>
+                  <article class="command-card compact-card">
+                    <h3>Tier 1</h3>
+                    <p>Safe admin actions.</p>
+                    <div class="command-token-row">
+                      <span class="command-token"><code>/backup create</code></span>
+                      <span class="command-token"><code>/backup list</code></span>
+                      <span class="command-token"><code>/backup delete</code></span>
+                      <span class="command-token"><code>/backupcreate</code></span>
+                      <span class="command-token"><code>/backuplist</code></span>
+                      <span class="command-token"><code>/panel suggestion</code></span>
+                      <span class="command-token">export commands</span>
                     </div>
                   </article>
-                  <article class="command-card">
-                    <h3>Tier 2 - Approval When Untrusted</h3>
-                    <p>Non-destructive high-impact actions.</p>
-                    <div class="chip-row">
-                      <span class="chip"><code>/restore_missing</code></span>
-                      <span class="chip"><code>/masschannels</code></span>
-                      <span class="chip"><code>/import guild</code></span>
-                      <span class="chip"><code>/backup load</code> merge mode</span>
+                  <article class="command-card compact-card">
+                    <h3>Tier 2</h3>
+                    <p>High-impact actions that stay non-destructive when configured safely.</p>
+                    <div class="command-token-row">
+                      <span class="command-token"><code>/restore_missing</code></span>
+                      <span class="command-token"><code>/masschannels</code></span>
+                      <span class="command-token"><code>/import guild</code></span>
+                      <span class="command-token"><code>/backup load</code> merge mode</span>
                     </div>
                   </article>
-                  <article class="command-card">
-                    <h3>Tier 3 - Destructive</h3>
-                    <p>Delete-enabled loads and cleanup paths.</p>
-                    <div class="chip-row">
-                      <span class="chip"><code>/backup load</code> with delete toggles</span>
-                      <span class="chip"><code>/backupload</code> destructive mode</span>
-                      <span class="chip"><code>/cleantoday</code></span>
+                  <article class="command-card compact-card">
+                    <h3>Tier 3</h3>
+                    <p>Delete-enabled load paths and cleanup operations.</p>
+                    <div class="command-token-row">
+                      <span class="command-token"><code>/backup load</code> delete toggles</span>
+                      <span class="command-token"><code>/backupload</code> destructive mode</span>
+                      <span class="command-token"><code>/cleantoday</code></span>
                     </div>
                   </article>
-                  <article class="command-card">
-                    <h3>Tier 4 - Owner Only</h3>
-                    <div class="chip-row">
-                      <span class="chip"><code>/leave</code></span>
-                      <span class="chip"><code>/safety grant</code></span>
-                      <span class="chip"><code>/safety revoke</code></span>
-                      <span class="chip"><code>/safety list</code></span>
+                  <article class="command-card compact-card">
+                    <h3>Tier 4</h3>
+                    <p>Owner-only governance.</p>
+                    <div class="command-token-row">
+                      <span class="command-token"><code>/leave</code></span>
+                      <span class="command-token"><code>/safety grant</code></span>
+                      <span class="command-token"><code>/safety revoke</code></span>
+                      <span class="command-token"><code>/safety list</code></span>
                     </div>
                   </article>
                 </div>
                 <div class="feature-cta">
                   <a class="btn primary" href="https://discord.com/oauth2/authorize?client_id=1478668338367434833&permissions=8&integration_type=0&scope=bot+applications.commands" target="_blank" rel="noreferrer">Add CLINX</a>
-                  <a class="btn" href="/#premium" data-section-link="premium" data-page-transition="true">View Plans</a>
+                  <a class="btn" href="/resources" data-page-transition="true">Open Resources</a>
                 </div>
               </section>
             </div>
@@ -289,14 +372,27 @@
             <span>CLINX</span><small>CreeD INC. &lt;/&gt;</small>
           </a>
           <p>Recovery-grade Discord control built for selective restores, safer approvals, and fast rebuilds.</p>
+          <p class="maker-line">MADE BY <span class="pixel-name">YUVRAJ</span></p>
+          <div class="footer-social">
+            <a class="btn footer-btn" href="https://discord.gg/V6YEw2Wxcb" target="_blank" rel="noreferrer">Discord</a>
+            <a class="btn footer-btn" href="https://github.com/creedincdev-op/clinx-restore-bot" target="_blank" rel="noreferrer">GitHub</a>
+            <a class="btn footer-btn" href="https://discord.com/oauth2/authorize?client_id=1478668338367434833&permissions=8&integration_type=0&scope=bot+applications.commands" target="_blank" rel="noreferrer">Invite</a>
+          </div>
         </div>
 
         <div class="footer-links">
           <div class="footer-column">
             <span class="footer-label">Product</span>
             <a href="/features">Features</a>
+            <a href="/resources" data-page-transition="true">Resources</a>
             <a href="/#premium" data-section-link="premium" data-page-transition="true">Plans</a>
+          </div>
+          <div class="footer-column">
+            <span class="footer-label">Resources</span>
+            <a href="/resources" data-page-transition="true">Documentation</a>
             <a href="/#faq" data-section-link="faq" data-page-transition="true">FAQ</a>
+            <a href="https://discord.gg/V6YEw2Wxcb" target="_blank" rel="noreferrer">Support Server</a>
+            <a href="https://github.com/creedincdev-op/clinx-restore-bot" target="_blank" rel="noreferrer">GitHub Repo</a>
           </div>
           <div class="footer-column">
             <span class="footer-label">Legal</span>
