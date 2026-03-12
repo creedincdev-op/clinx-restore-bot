@@ -1363,7 +1363,7 @@ async def apply_snapshot_to_guild(
                 pass
 
     if load_roles and not create_only_missing:
-        existing_roles = {role.name: role for role in target.roles}
+        existing_roles = {} if delete_roles else {role.name: role for role in target.roles}
         for role_data in sorted(snapshot.get("roles", []), key=lambda r: r.get("position", 0)):
             role = existing_roles.get(role_data["name"])
             permissions = discord.Permissions(role_data.get("permissions", 0))
@@ -1406,7 +1406,7 @@ async def apply_snapshot_to_guild(
 
     if load_channels:
         category_map: dict[str, discord.CategoryChannel] = {}
-        existing_categories = {category.name: category for category in target.categories}
+        existing_categories = {} if delete_channels else {category.name: category for category in target.categories}
 
         for cat_data in snapshot.get("categories", []):
             existing = existing_categories.get(cat_data["name"])
@@ -1442,7 +1442,7 @@ async def apply_snapshot_to_guild(
 
             category_map[cat_data["name"]] = existing
 
-        existing_channels = {channel.name: channel for channel in target.channels}
+        existing_channels = {} if delete_channels else {channel.name: channel for channel in target.channels}
         for ch_data in snapshot.get("channels", []):
             existing = existing_channels.get(ch_data["name"])
             category = category_map.get(ch_data.get("category")) if ch_data.get("category") else None
