@@ -69,6 +69,36 @@
         linear-gradient(180deg, #081120 0%, #070e1d 36%, #06090f 100%);
     }
 
+    body.page-enhanced {
+      background: #06090f;
+    }
+
+    body.page-enhanced .page {
+      opacity: 0;
+      transform: translateY(22px) scale(.986);
+      filter: blur(10px);
+      transition:
+        opacity .42s cubic-bezier(.22, 1, .36, 1),
+        transform .58s cubic-bezier(.22, 1, .36, 1),
+        filter .42s ease;
+    }
+
+    body.page-enhanced.page-ready .page {
+      opacity: 1;
+      transform: none;
+      filter: none;
+    }
+
+    body.page-enhanced.page-leaving {
+      pointer-events: none;
+    }
+
+    body.page-enhanced.page-leaving .page {
+      opacity: 0;
+      transform: translateY(28px) scale(.982);
+      filter: blur(12px);
+    }
+
     .page::before {
       content: "";
       position: fixed;
@@ -498,6 +528,59 @@
       grid-template-columns: 1fr 1fr;
       gap: 26px;
       align-items: center;
+    }
+
+    .feature-portal {
+      background:
+        radial-gradient(820px 220px at 14% 0%, rgba(93,232,255,.09), transparent 60%),
+        linear-gradient(180deg, rgba(8, 17, 34, .34), rgba(8, 16, 31, .08));
+    }
+
+    .feature-portal-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 24px;
+    }
+
+    .feature-portal-head .btn {
+      flex-shrink: 0;
+    }
+
+    .feature-portal-grid {
+      margin-top: 24px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .portal-card {
+      border: 1px solid rgba(67, 108, 183, .7);
+      border-radius: 16px;
+      background:
+        radial-gradient(380px 120px at 0% 0%, rgba(93,232,255,.12), transparent 58%),
+        linear-gradient(180deg, #10244c, #0c1a37);
+      padding: 18px;
+      display: grid;
+      gap: 10px;
+      transition: transform .24s ease, border-color .24s ease, box-shadow .24s ease;
+    }
+
+    .portal-card:hover {
+      transform: translateY(-4px);
+      border-color: #6ddcff;
+      box-shadow: 0 14px 28px rgba(10, 28, 59, .34);
+    }
+
+    .portal-card strong {
+      font-size: 1rem;
+      color: #eff8ff;
+    }
+
+    .portal-card span {
+      color: #b6cae7;
+      line-height: 1.65;
+      font-size: .92rem;
     }
 
     .stack {
@@ -1170,6 +1253,7 @@
       .split,
       .advantage-top,
       .advantage-grid,
+      .feature-portal-head,
       .premium-top,
       .plans,
       .footer-top {
@@ -1185,6 +1269,15 @@
       }
 
       .legal-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .feature-portal-head {
+        display: grid;
+        align-items: start;
+      }
+
+      .feature-portal-grid {
         grid-template-columns: 1fr;
       }
 
