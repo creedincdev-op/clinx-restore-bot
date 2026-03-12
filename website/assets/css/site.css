@@ -532,6 +532,123 @@
       font-size: .93rem;
     }
 
+    .advantage-zone {
+      background:
+        radial-gradient(700px 220px at 82% 12%, rgba(101,255,204,.08), transparent 62%),
+        linear-gradient(180deg, rgba(9, 20, 42, .34), rgba(8, 17, 34, .08));
+    }
+
+    .advantage-top {
+      display: grid;
+      grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr);
+      gap: 20px;
+      align-items: end;
+    }
+
+    .advantage-badges {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
+    .advantage-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 42px;
+      padding: 0 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(93,232,255,.34);
+      background: rgba(93,232,255,.08);
+      color: #daf8ff;
+      font-weight: 700;
+      font-size: .85rem;
+      line-height: 1.3;
+    }
+
+    .advantage-grid {
+      margin-top: 28px;
+      display: grid;
+      grid-template-columns: minmax(0, .92fr) minmax(0, 1.08fr);
+      gap: 24px;
+      align-items: start;
+    }
+
+    .advantage-card {
+      border: 1px solid rgba(66,109,180,.72);
+      border-radius: 16px;
+      background:
+        radial-gradient(420px 120px at 8% 0%, rgba(93,232,255,.12), transparent 60%),
+        linear-gradient(180deg, #10244c, #0d1d3f);
+      padding: 16px;
+      transition: transform .24s ease, box-shadow .24s ease, border-color .24s ease;
+    }
+
+    .advantage-card:hover {
+      transform: translateY(-4px);
+      border-color: #67cfff;
+      box-shadow: 0 14px 28px rgba(13, 33, 71, .35);
+    }
+
+    .advantage-card h3 {
+      margin: 0 0 8px;
+      font-size: 1.06rem;
+    }
+
+    .advantage-card p {
+      margin: 0;
+      color: #bdd0ea;
+      line-height: 1.68;
+    }
+
+    .guard-panel {
+      border: 1px solid #436db4;
+      border-radius: 18px;
+      overflow: hidden;
+      background:
+        radial-gradient(420px 160px at 100% 0%, rgba(143,140,255,.18), transparent 58%),
+        linear-gradient(180deg, #112753, #0b1833);
+      box-shadow: 0 18px 34px rgba(5, 14, 31, .28);
+    }
+
+    .guard-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid rgba(67,109,180,.56);
+      color: #d6e9ff;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: .78rem;
+    }
+
+    .guard-list {
+      display: grid;
+      gap: 0;
+    }
+
+    .guard-item {
+      display: grid;
+      gap: 6px;
+      padding: 16px;
+      border-top: 1px solid rgba(67,109,180,.34);
+    }
+
+    .guard-item:first-child {
+      border-top: 0;
+    }
+
+    .guard-item b {
+      color: #eff7ff;
+      font-size: 1rem;
+    }
+
+    .guard-item span {
+      color: #b6cbe7;
+      line-height: 1.6;
+    }
+
     .mock {
       border: 1px solid #375ea6;
       border-radius: 16px;
@@ -860,15 +977,197 @@
       color: #bfd1eb;
     }
 
-    .footer {
+    .site-footer {
+      position: relative;
+      overflow: hidden;
       border-top: 1px solid rgba(58, 91, 159, .31);
-      padding: 22px 0 34px;
+      background:
+        radial-gradient(900px 300px at 18% 0%, rgba(93,232,255,.08), transparent 60%),
+        radial-gradient(500px 220px at 88% 28%, rgba(143,140,255,.12), transparent 62%),
+        linear-gradient(180deg, rgba(9, 19, 39, .96), rgba(5, 10, 20, .98));
+    }
+
+    .footer-shell {
+      position: relative;
+      padding: 34px 0 28px;
+    }
+
+    .footer-floats {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+
+    .footer-float {
+      position: absolute;
+      border: 1px solid rgba(93,232,255,.24);
+      border-radius: 999px;
+      padding: 9px 14px;
+      background: rgba(10, 27, 58, .52);
+      color: rgba(211, 241, 255, .78);
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: .72rem;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+      animation: footer-drift 5.6s ease-in-out infinite;
+      box-shadow: 0 10px 24px rgba(4, 12, 27, .22);
+    }
+
+    .footer-float.one {
+      top: 16px;
+      right: 17%;
+    }
+
+    .footer-float.two {
+      top: 116px;
+      right: 5%;
+      animation-delay: -1.4s;
+    }
+
+    .footer-float.three {
+      top: 128px;
+      left: 30%;
+      animation-delay: -2.2s;
+    }
+
+    @keyframes footer-drift {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-8px); }
+    }
+
+    .footer-top {
+      display: grid;
+      grid-template-columns: minmax(0, .8fr) minmax(0, 1fr);
+      gap: 42px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .footer-brand-block {
+      display: grid;
+      align-content: start;
+      gap: 18px;
+    }
+
+    .footer-logo {
+      display: inline-flex;
+      align-items: center;
+      gap: 14px;
+      width: fit-content;
+    }
+
+    .footer-logo strong {
+      display: block;
+      font-family: 'Syne', sans-serif;
+      font-size: 1.7rem;
+      letter-spacing: -.03em;
+    }
+
+    .footer-logo small {
+      display: block;
+      margin-top: 4px;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: .78rem;
+      color: #a5c8ed;
+    }
+
+    .footer-creator {
+      display: grid;
+      gap: 8px;
+    }
+
+    .footer-created-label {
+      font-size: .74rem;
+      font-weight: 700;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+      color: #91b9df;
+    }
+
+    .footer-created-name {
+      font-family: 'Press Start 2P', monospace;
+      font-size: .92rem;
+      color: var(--mint);
+      letter-spacing: .08em;
+      text-shadow: 0 0 14px rgba(101,255,204,.18);
+    }
+
+    .footer-socials,
+    .footer-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .footer-chip,
+    .footer-ghost {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 0 16px;
+      border-radius: 12px;
+      border: 1px solid rgba(63, 103, 174, .62);
+      background: rgba(255,255,255,.035);
+      color: #e6f1ff;
+      font-weight: 700;
+      transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease;
+    }
+
+    .footer-chip:hover,
+    .footer-ghost:hover {
+      transform: translateY(-1px);
+      border-color: #5d84c8;
+      box-shadow: 0 10px 24px rgba(20, 47, 96, .26);
+    }
+
+    .footer-columns {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 22px;
+    }
+
+    .footer-column {
+      display: grid;
+      align-content: start;
+      gap: 12px;
+    }
+
+    .footer-column h3 {
+      margin: 0 0 6px;
+      font-size: .88rem;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: #eef5ff;
+    }
+
+    .footer-column a {
+      color: #b6cae7;
+      line-height: 1.55;
+      transition: color .2s ease;
+    }
+
+    .footer-column a:hover {
+      color: #fff;
+    }
+
+    .footer-bottom {
+      margin-top: 28px;
+      padding-top: 22px;
+      border-top: 1px solid rgba(58, 91, 159, .31);
       display: flex;
       justify-content: space-between;
-      gap: 12px;
+      gap: 16px;
+      align-items: center;
       flex-wrap: wrap;
-      color: #aac0dc;
-      font-size: .9rem;
+      position: relative;
+      z-index: 1;
+    }
+
+    .footer-copy {
+      margin: 0;
+      font-weight: 700;
+      color: #dceafe;
     }
 
     .mono {
@@ -889,8 +1188,11 @@
     @media (max-width: 1030px) {
       .hero,
       .split,
+      .advantage-top,
+      .advantage-grid,
       .premium-top,
-      .plans {
+      .plans,
+      .footer-top {
         grid-template-columns: 1fr;
       }
 
@@ -906,6 +1208,17 @@
         grid-template-columns: 1fr;
       }
 
+      .advantage-badges {
+        justify-content: flex-start;
+      }
+
+      .footer-columns {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .footer-float.three {
+        left: 18%;
+      }
     }
 
     @media (max-width: 720px) {
@@ -952,5 +1265,18 @@
 
       .mock-grid {
         grid-template-columns: 70px 1fr;
+      }
+
+      .footer-columns {
+        grid-template-columns: 1fr;
+      }
+
+      .footer-float {
+        display: none;
+      }
+
+      .footer-chip,
+      .footer-ghost {
+        width: auto;
       }
     }
