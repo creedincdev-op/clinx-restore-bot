@@ -288,7 +288,7 @@ async def apply_snapshot_to_guild(
         "updated_settings": 0,
     }
     precreated_categories: dict[str, discord.CategoryChannel] = {}
-    precreated_channels: set[str] = set()
+    precreated_channels: dict[str, discord.abc.GuildChannel] = {}
 
     if delete_channels and not create_only_missing:
         for channel in list(target.channels):
@@ -299,7 +299,9 @@ async def apply_snapshot_to_guild(
                 pass
 
     if load_channels and not create_only_missing:
-        structure_category_map: dict[str, discord.CategoryChannel] = {category.name: category for category in target.categories}
+        structure_category_map: dict[str, discord.CategoryChannel] = (
+            {} if delete_channels else {category.name: category for category in target.categories}
+        )
 
         for cat_data in snapshot.get("categories", []):
             if cat_data["name"] in structure_category_map:
@@ -319,7 +321,7 @@ async def apply_snapshot_to_guild(
             category = structure_category_map.get(ch_data.get("category")) if ch_data.get("category") else None
             try:
                 if ch_data["type"] == "text":
-                    await target.create_text_channel(
+                    created_channel = await target.create_text_channel(
                         name=ch_data["name"],
                         category=category,
                         topic=ch_data.get("topic"),
@@ -327,7 +329,7 @@ async def apply_snapshot_to_guild(
                         nsfw=ch_data.get("nsfw", False),
                     )
                 elif ch_data["type"] == "voice":
-                    await target.create_voice_channel(
+                    created_channel = await target.create_voice_channel(
                         name=ch_data["name"],
                         category=category,
                         bitrate=ch_data.get("bitrate"),
@@ -335,7 +337,7 @@ async def apply_snapshot_to_guild(
                     )
                 else:
                     continue
-                precreated_channels.add(ch_data["name"])
+                precreated_channels[ch_data["name"]] = created_channel
                 result["created_channels"] += 1
             except discord.Forbidden:
                 continue
@@ -351,14 +353,15 @@ async def apply_snapshot_to_guild(
                 pass
 
     if load_roles and not create_only_missing:
+        existing_roles = {} if delete_roles else {role.name: role for role in target.roles}
         for role_data in sorted(snapshot.get("roles", []), key=lambda r: r.get("position", 0)):
-            role = discord.utils.get(target.roles, name=role_data["name"])
+            role = existing_roles.get(role_data["name"])
             permissions = discord.Permissions(role_data.get("permissions", 0))
             color = discord.Colour(role_data.get("color", 0))
 
             if role is None:
                 try:
-                    await target.create_role(
+                    created_role = await target.create_role(
                         name=role_data["name"],
                         permissions=permissions,
                         colour=color,
@@ -366,6 +369,7 @@ async def apply_snapshot_to_guild(
                         mentionable=role_data.get("mentionable", False),
                         reason="CLINX backup load: create role",
                     )
+                    existing_roles[role_data["name"]] = created_role
                     result["created_roles"] += 1
                 except discord.Forbidden:
                     pass
@@ -384,9 +388,10 @@ async def apply_snapshot_to_guild(
 
     if load_channels:
         category_map: dict[str, discord.CategoryChannel] = dict(precreated_categories)
+        existing_categories = {} if delete_channels else {category.name: category for category in target.categories}
 
         for cat_data in snapshot.get("categories", []):
-            existing = category_map.get(cat_data["name"]) or discord.utils.get(target.categories, name=cat_data["name"])
+            existing = category_map.get(cat_data["name"]) or existing_categories.get(cat_data["name"])
             overwrites = deserialize_overwrites(cat_data.get("overwrites", []), target)
 
             if existing is None:
@@ -403,8 +408,9 @@ async def apply_snapshot_to_guild(
 
             category_map[cat_data["name"]] = existing
 
+        existing_channels = {} if delete_channels else {channel.name: channel for channel in target.channels}
         for ch_data in snapshot.get("channels", []):
-            existing = discord.utils.get(target.channels, name=ch_data["name"])
+            existing = precreated_channels.get(ch_data["name"]) or existing_channels.get(ch_data["name"])
             category = category_map.get(ch_data.get("category")) if ch_data.get("category") else None
             overwrites = deserialize_overwrites(ch_data.get("overwrites", []), target)
 
