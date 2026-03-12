@@ -1,4 +1,5 @@
 ﻿import asyncio
+import base64
 import csv
 import io
 import json
@@ -30,7 +31,7 @@ EMBED_INFO = 0x3498DB
 
 IMPORT_JOBS: dict[int, dict[str, Any]] = {}
 PENDING_APPROVALS: dict[int, "PendingApproval"] = {}
-ACTION_DELAY_SECONDS = max(0.0, float(os.getenv("DISCORD_ACTION_DELAY_SECONDS", "1.0")))
+ACTION_DELAY_SECONDS = max(0.0, float(os.getenv("DISCORD_ACTION_DELAY_SECONDS", "0.65")))
 ACTION_RETRY_LIMIT = max(1, int(os.getenv("DISCORD_ACTION_RETRY_LIMIT", "5")))
 ACTION_GATE_LOCK: asyncio.Lock | None = None
 ACTION_LAST_DISPATCH_AT = 0.0
@@ -1085,16 +1086,46 @@ def serialize_roles(guild: discord.Guild) -> list[dict[str, Any]]:
     return data
 
 
-def serialize_settings(guild: discord.Guild) -> dict[str, Any]:
+async def serialize_asset(asset: discord.Asset | None) -> str | None:
+    if asset is None:
+        return None
+    try:
+        return base64.b64encode(await asset.read()).decode("ascii")
+    except discord.HTTPException:
+        return None
+
+
+def serialize_channel_ref(channel: discord.abc.GuildChannel | None) -> str | None:
+    return channel.name if channel is not None else None
+
+
+async def serialize_settings(guild: discord.Guild, *, include_assets: bool = True) -> dict[str, Any]:
+    icon_image = await serialize_asset(guild.icon) if include_assets else None
+    banner_image = await serialize_asset(guild.banner) if include_assets else None
+    splash_image = await serialize_asset(guild.splash) if include_assets else None
+    discovery_splash_image = await serialize_asset(guild.discovery_splash) if include_assets else None
     return {
+        "name": guild.name,
+        "description": guild.description,
+        "icon_image": icon_image,
+        "banner_image": banner_image,
+        "splash_image": splash_image,
+        "discovery_splash_image": discovery_splash_image,
         "verification_level": int(guild.verification_level.value),
         "default_notifications": int(guild.default_notifications.value),
         "explicit_content_filter": int(guild.explicit_content_filter.value),
         "afk_timeout": guild.afk_timeout,
+        "preferred_locale": str(guild.preferred_locale),
+        "premium_progress_bar_enabled": bool(guild.premium_progress_bar_enabled),
+        "system_channel": serialize_channel_ref(guild.system_channel),
+        "system_channel_flags": guild.system_channel_flags.value,
+        "rules_channel": serialize_channel_ref(guild.rules_channel),
+        "public_updates_channel": serialize_channel_ref(guild.public_updates_channel),
+        "afk_channel": serialize_channel_ref(guild.afk_channel),
     }
 
 
-def serialize_guild_snapshot(guild: discord.Guild) -> dict[str, Any]:
+async def serialize_guild_snapshot(guild: discord.Guild, *, include_assets: bool = True) -> dict[str, Any]:
     categories: list[dict[str, Any]] = []
     channels: list[dict[str, Any]] = []
 
@@ -1137,8 +1168,10 @@ def serialize_guild_snapshot(guild: discord.Guild) -> dict[str, Any]:
     return {
         "version": 1,
         "created_at": utc_now_iso(),
+        "source_guild_id": guild.id,
+        "source_guild_name": guild.name,
         "roles": serialize_roles(guild),
-        "settings": serialize_settings(guild),
+        "settings": await serialize_settings(guild, include_assets=include_assets),
         "categories": categories,
         "channels": channels,
     }
@@ -1151,6 +1184,27 @@ def resolve_default_backup_guild_id() -> int | None:
         return int(DEFAULT_BACKUP_GUILD_ID)
     except ValueError:
         return None
+
+
+def decode_snapshot_asset(payload: Any) -> bytes | None:
+    if not payload:
+        return None
+    try:
+        return base64.b64decode(payload)
+    except (ValueError, TypeError):
+        return None
+
+
+def resolve_text_channel_by_name(guild: discord.Guild, channel_name: str | None) -> discord.TextChannel | None:
+    if not channel_name:
+        return None
+    return discord.utils.get(guild.text_channels, name=channel_name)
+
+
+def resolve_voice_channel_by_name(guild: discord.Guild, channel_name: str | None) -> discord.VoiceChannel | None:
+    if not channel_name:
+        return None
+    return discord.utils.get(guild.voice_channels, name=channel_name)
 
 
 async def apply_snapshot_to_guild(
@@ -1228,22 +1282,6 @@ async def apply_snapshot_to_guild(
                     result["updated_roles"] += 1
                 except discord.Forbidden:
                     pass
-
-    if load_settings and not create_only_missing:
-        settings = snapshot.get("settings", {})
-        try:
-            await throttled_discord_call(
-                lambda settings=settings: target.edit(
-                    verification_level=discord.VerificationLevel(settings.get("verification_level", target.verification_level.value)),
-                    default_notifications=discord.NotificationLevel(settings.get("default_notifications", target.default_notifications.value)),
-                    explicit_content_filter=discord.ContentFilter(settings.get("explicit_content_filter", target.explicit_content_filter.value)),
-                    afk_timeout=settings.get("afk_timeout", target.afk_timeout),
-                    reason="CLINX backup load: update settings",
-                )
-            )
-            result["updated_settings"] = 1
-        except discord.Forbidden:
-            pass
 
     if load_channels:
         category_map: dict[str, discord.CategoryChannel] = {}
@@ -1336,6 +1374,71 @@ async def apply_snapshot_to_guild(
                     result["updated_channels"] += 1
             except discord.Forbidden:
                 pass
+
+    if load_settings and not create_only_missing:
+        settings = snapshot.get("settings", {})
+        edit_kwargs: dict[str, Any] = {
+            "name": settings.get("name", target.name),
+            "description": settings.get("description"),
+            "verification_level": discord.VerificationLevel(settings.get("verification_level", target.verification_level.value)),
+            "default_notifications": discord.NotificationLevel(settings.get("default_notifications", target.default_notifications.value)),
+            "explicit_content_filter": discord.ContentFilter(settings.get("explicit_content_filter", target.explicit_content_filter.value)),
+            "afk_timeout": settings.get("afk_timeout", target.afk_timeout),
+            "afk_channel": resolve_voice_channel_by_name(target, settings.get("afk_channel")),
+            "system_channel": resolve_text_channel_by_name(target, settings.get("system_channel")),
+            "rules_channel": resolve_text_channel_by_name(target, settings.get("rules_channel")),
+            "public_updates_channel": resolve_text_channel_by_name(target, settings.get("public_updates_channel")),
+            "premium_progress_bar_enabled": bool(settings.get("premium_progress_bar_enabled", target.premium_progress_bar_enabled)),
+            "reason": "CLINX backup load: update settings",
+        }
+
+        preferred_locale = settings.get("preferred_locale")
+        if preferred_locale:
+            try:
+                edit_kwargs["preferred_locale"] = discord.Locale(preferred_locale)
+            except ValueError:
+                pass
+
+        system_channel_flags = settings.get("system_channel_flags")
+        if system_channel_flags is not None:
+            try:
+                edit_kwargs["system_channel_flags"] = discord.SystemChannelFlags._from_value(int(system_channel_flags))
+            except (TypeError, ValueError):
+                pass
+
+        settings_applied = False
+        try:
+            await throttled_discord_call(lambda edit_kwargs=edit_kwargs: target.edit(**edit_kwargs))
+            settings_applied = True
+        except discord.Forbidden:
+            pass
+
+        icon_bytes = decode_snapshot_asset(settings.get("icon_image"))
+        banner_bytes = decode_snapshot_asset(settings.get("banner_image"))
+        splash_bytes = decode_snapshot_asset(settings.get("splash_image"))
+        discovery_splash_bytes = decode_snapshot_asset(settings.get("discovery_splash_image"))
+
+        for asset_key, asset_bytes in (
+            ("icon", icon_bytes),
+            ("banner", banner_bytes),
+            ("splash", splash_bytes),
+            ("discovery_splash", discovery_splash_bytes),
+        ):
+            if asset_key not in settings and asset_bytes is None:
+                continue
+            try:
+                await throttled_discord_call(
+                    lambda asset_key=asset_key, asset_bytes=asset_bytes: target.edit(
+                        **{asset_key: asset_bytes},
+                        reason=f"CLINX backup load: update {asset_key.replace('_', ' ')}",
+                    )
+                )
+                settings_applied = True
+            except (discord.Forbidden, discord.HTTPException):
+                continue
+
+        if settings_applied:
+            result["updated_settings"] = 1
 
     return result
 
@@ -1612,6 +1715,39 @@ def render_backup_guardrail_lines(selected_actions: set[str]) -> str:
     return "\n".join(lines)
 
 
+def render_backup_settings_lines(snapshot: dict[str, Any], selected_actions: set[str]) -> str:
+    if "load_settings" not in selected_actions:
+        return "• Settings lane is currently off."
+
+    settings = snapshot.get("settings", {})
+    lines = [
+        "• **Core Profile**: name, description, verification, notifications, content filter, AFK, locale, and progress bar",
+    ]
+
+    if settings.get("icon_image"):
+        lines.append("• **Server Icon** will sync from the backup snapshot")
+    if settings.get("banner_image"):
+        lines.append("• **Server Banner** will sync from the backup snapshot")
+    if settings.get("splash_image"):
+        lines.append("• **Invite Splash** will sync from the backup snapshot")
+    if settings.get("discovery_splash_image"):
+        lines.append("• **Discovery Splash** will sync from the backup snapshot")
+
+    linked_channels: list[str] = []
+    if settings.get("system_channel"):
+        linked_channels.append("system channel")
+    if settings.get("rules_channel"):
+        linked_channels.append("rules channel")
+    if settings.get("public_updates_channel"):
+        linked_channels.append("updates channel")
+    if settings.get("afk_channel"):
+        linked_channels.append("AFK channel")
+    if linked_channels:
+        lines.append(f"• **Linked Channels**: {', '.join(linked_channels)}")
+
+    return "\n".join(lines)
+
+
 def render_backup_result_lines(stats: dict[str, int]) -> str:
     lines = [
         f"• **{stats['deleted_roles']}** roles deleted",
@@ -1759,12 +1895,19 @@ async def run_backup_load_operation(
         )
 
 
-def render_backup_detail_lines(snapshot: dict[str, Any], target: discord.Guild, selected_actions: set[str], plan: dict[str, int]) -> str:
+def render_backup_detail_lines(
+    snapshot: dict[str, Any],
+    source_name: str,
+    target: discord.Guild,
+    selected_actions: set[str],
+    plan: dict[str, int],
+) -> str:
     detail_lines = [
-        f"**Source Server**\n`{snapshot.get('source_guild_name', 'Unknown Source')}`",
+        f"**Source Server**\n`{snapshot.get('source_guild_name', source_name)}`",
         f"**Target Server**\n`{target.name}`",
         f"**Restore Lanes**\n{render_backup_lane_lines(selected_actions)}",
         f"**Snapshot Scope**\nRoles `{len(snapshot.get('roles', []))}` | Categories `{len(snapshot.get('categories', []))}` | Channels `{len(snapshot.get('channels', []))}`",
+        f"**Settings Scope**\n{render_backup_settings_lines(snapshot, selected_actions)}",
     ]
     if plan.get("conflicting_channels"):
         detail_lines.append("**Conflict Watch**\nSome existing channel names already use a different channel type. CLINX will not auto-convert those lanes.")
@@ -1871,6 +2014,123 @@ class BackupLoadDetailButton(discord.ui.Button["BackupLoadPlannerView"]):
         )
 
 
+async def execute_backup_load_request(
+    interaction: discord.Interaction,
+    *,
+    backup_id: str,
+    source_name: str,
+    snapshot: dict[str, Any],
+    target: discord.Guild,
+    selected_actions: set[str],
+) -> None:
+    destructive = any(action in selected_actions for action in BACKUP_DELETE_DEPENDENCIES)
+    decision = require_clinx_access(
+        interaction,
+        "backup load",
+        context={"destructive": destructive},
+    )
+    if decision.denial_message:
+        await interaction.response.send_message(decision.denial_message, ephemeral=True)
+        return
+
+    plan = build_backup_plan_preview(snapshot, target, selected_actions)
+    if decision.requires_owner_approval:
+        route_text = f"`{source_name}` -> `{target.name}`"
+        risk_label = "Destructive" if destructive else "Non-Destructive"
+        summary_text = format_approval_summary(
+            requester_id=interaction.user.id,
+            command_name="backup load",
+            target_name=target.name,
+            route_text=route_text,
+            scope_title="Selected Actions",
+            scope_text=", ".join(BACKUP_ACTION_LABELS[action] for action in BACKUP_ACTION_ORDER if action in selected_actions) or "No actions selected",
+            risk_label=risk_label,
+        )
+        if has_pending_approval(interaction.guild.id):
+            await interaction.response.send_message("Another protected CLINX request is already waiting for the owner in this server.", ephemeral=True)
+            return
+        await interaction.response.edit_message(
+            view=BackupLoadStatusView(
+                title="## `<>` Waiting For Owner Approval",
+                subtitle="The restore plan is staged and waiting for the server owner.",
+                body="CLINX will execute this backup load only after the owner approves the public request card in this channel.",
+                accent_color=EMBED_WARN,
+            )
+        )
+
+        async def execute_backup_load(message: discord.Message) -> None:
+            await run_backup_load_operation(
+                backup_id=backup_id,
+                source_name=source_name,
+                snapshot=snapshot,
+                target=target,
+                selected_actions=set(selected_actions),
+                public_status_message=message,
+            )
+
+        queued = await queue_owner_approval(
+            interaction,
+            command_name="backup load",
+            tier=decision.tier,
+            risk_label=risk_label,
+            summary_text=summary_text,
+            preview_title="Planned Changes",
+            preview_body=render_backup_plan_lines(plan),
+            execute=execute_backup_load,
+        )
+        if queued is None:
+            await interaction.edit_original_response(
+                view=BackupLoadStatusView(
+                    title="## `x` Approval Request Failed",
+                    subtitle="CLINX could not queue the owner approval request.",
+                    body="Resolve any existing approval card in this guild, then reopen the planner and try again.",
+                    accent_color=EMBED_ERR,
+                )
+            )
+        return
+
+    await interaction.response.edit_message(
+        view=BackupLoadStatusView(
+            title="## `<>` Applying Backup",
+            subtitle=f"CLINX is rebuilding `{target.name}` from backup `{backup_id}`.",
+            body="Write pacing is active. Roles, channels, and server settings are being restored in a controlled sequence to avoid Discord rate spikes.",
+            accent_color=BACKUP_PLANNER_ACCENT,
+        )
+    )
+    public_status_message: discord.Message | None = None
+    channel = interaction.channel
+    if interaction.guild is not None and channel is not None and hasattr(channel, "send"):
+        try:
+            public_status_message = await channel.send(
+                embed=build_backup_operation_embed(
+                    title="Backup Load Started",
+                    backup_id=backup_id,
+                    source_name=source_name,
+                    target_name=target.name,
+                    selected_actions=selected_actions,
+                    changes_title="Planned Changes",
+                    changes_body=render_backup_plan_lines(plan),
+                    color=BACKUP_PLANNER_ACCENT,
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            public_status_message = None
+
+    try:
+        await run_backup_load_operation(
+            backup_id=backup_id,
+            source_name=source_name,
+            snapshot=snapshot,
+            target=target,
+            selected_actions=selected_actions,
+            private_interaction=interaction,
+            public_status_message=public_status_message,
+        )
+    except Exception:
+        return
+
+
 class BackupLoadContinueButton(discord.ui.Button["BackupLoadPlannerView"]):
     def __init__(
         self,
@@ -1883,8 +2143,8 @@ class BackupLoadContinueButton(discord.ui.Button["BackupLoadPlannerView"]):
         selected_actions: set[str],
     ) -> None:
         super().__init__(
-            label="Continue",
-            style=discord.ButtonStyle.success,
+            label="Review Changes",
+            style=discord.ButtonStyle.primary,
             disabled=not selected_actions,
         )
         self.backup_id = backup_id
@@ -1899,113 +2159,86 @@ class BackupLoadContinueButton(discord.ui.Button["BackupLoadPlannerView"]):
             await interaction.response.send_message("Only the command user can use these controls.", ephemeral=True)
             return
 
-        destructive = any(action in self.selected_actions for action in BACKUP_DELETE_DEPENDENCIES)
-        decision = require_clinx_access(
-            interaction,
-            "backup load",
-            context={"destructive": destructive},
-        )
-        if decision.denial_message:
-            await interaction.response.send_message(decision.denial_message, ephemeral=True)
-            return
-
-        plan = build_backup_plan_preview(self.snapshot, self.target, self.selected_actions)
-        if decision.requires_owner_approval:
-            route_text = f"`{self.source_name}` -> `{self.target.name}`"
-            risk_label = "Destructive" if destructive else "Non-Destructive"
-            summary_text = format_approval_summary(
-                requester_id=interaction.user.id,
-                command_name="backup load",
-                target_name=self.target.name,
-                route_text=route_text,
-                scope_title="Selected Actions",
-                scope_text=", ".join(BACKUP_ACTION_LABELS[action] for action in BACKUP_ACTION_ORDER if action in self.selected_actions) or "No actions selected",
-                risk_label=risk_label,
-            )
-            if has_pending_approval(interaction.guild.id):
-                await interaction.response.send_message("Another protected CLINX request is already waiting for the owner in this server.", ephemeral=True)
-                return
-            await interaction.response.edit_message(
-                view=BackupLoadStatusView(
-                    title="## `<>` Waiting For Owner Approval",
-                    subtitle="The restore plan is staged and waiting for the server owner.",
-                    body="CLINX will execute this backup load only after the owner approves the public request card in this channel.",
-                    accent_color=EMBED_WARN,
-                )
-            )
-
-            async def execute_backup_load(message: discord.Message) -> None:
-                await run_backup_load_operation(
-                    backup_id=self.backup_id,
-                    source_name=self.source_name,
-                    snapshot=self.snapshot,
-                    target=self.target,
-                    selected_actions=set(self.selected_actions),
-                    public_status_message=message,
-                )
-
-            queued = await queue_owner_approval(
-                interaction,
-                command_name="backup load",
-                tier=decision.tier,
-                risk_label=risk_label,
-                summary_text=summary_text,
-                preview_title="Planned Changes",
-                preview_body=render_backup_plan_lines(plan),
-                execute=execute_backup_load,
-            )
-            if queued is None:
-                await interaction.edit_original_response(
-                    view=BackupLoadStatusView(
-                        title="## `x` Approval Request Failed",
-                        subtitle="CLINX could not queue the owner approval request.",
-                        body="Resolve any existing approval card in this guild, then reopen the planner and try again.",
-                        accent_color=EMBED_ERR,
-                    )
-                )
-                return
-            return
-
         await interaction.response.edit_message(
-            view=BackupLoadStatusView(
-                title="## `<>` Applying Backup",
-                subtitle=f"CLINX is rebuilding `{self.target.name}` from backup `{self.backup_id}`.",
-                body="Write pacing is active. Roles, channels, and server settings are being restored in a controlled sequence to avoid Discord rate spikes.",
-                accent_color=BACKUP_PLANNER_ACCENT,
-            )
-        )
-        public_status_message: discord.Message | None = None
-        channel = interaction.channel
-        if interaction.guild is not None and channel is not None and hasattr(channel, "send"):
-            try:
-                public_status_message = await channel.send(
-                    embed=build_backup_operation_embed(
-                        title="Backup Load Started",
-                        backup_id=self.backup_id,
-                        source_name=self.source_name,
-                        target_name=self.target.name,
-                        selected_actions=self.selected_actions,
-                        changes_title="Planned Changes",
-                        changes_body=render_backup_plan_lines(plan),
-                        color=BACKUP_PLANNER_ACCENT,
-                    ),
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            except discord.HTTPException:
-                public_status_message = None
-
-        try:
-            await run_backup_load_operation(
+            view=BackupLoadReviewView(
                 backup_id=self.backup_id,
                 source_name=self.source_name,
+                author_id=self.author_id,
                 snapshot=self.snapshot,
                 target=self.target,
                 selected_actions=self.selected_actions,
-                private_interaction=interaction,
-                public_status_message=public_status_message,
             )
-        except Exception:
+        )
+
+
+class BackupLoadBackButton(discord.ui.Button["BackupLoadReviewView"]):
+    def __init__(
+        self,
+        *,
+        backup_id: str,
+        source_name: str,
+        author_id: int,
+        snapshot: dict[str, Any],
+        target: discord.Guild,
+        selected_actions: set[str],
+    ) -> None:
+        super().__init__(label="Back", style=discord.ButtonStyle.secondary)
+        self.backup_id = backup_id
+        self.source_name = source_name
+        self.author_id = author_id
+        self.snapshot = snapshot
+        self.target = target
+        self.selected_actions = set(selected_actions)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the command user can use these controls.", ephemeral=True)
             return
+
+        await interaction.response.edit_message(
+            view=BackupLoadPlannerView(
+                backup_id=self.backup_id,
+                source_name=self.source_name,
+                author_id=self.author_id,
+                snapshot=self.snapshot,
+                target=self.target,
+                selected_actions=self.selected_actions,
+            )
+        )
+
+
+class BackupLoadConfirmButton(discord.ui.Button["BackupLoadReviewView"]):
+    def __init__(
+        self,
+        *,
+        backup_id: str,
+        source_name: str,
+        author_id: int,
+        snapshot: dict[str, Any],
+        target: discord.Guild,
+        selected_actions: set[str],
+    ) -> None:
+        super().__init__(label="Confirm Apply", style=discord.ButtonStyle.success, disabled=not selected_actions)
+        self.backup_id = backup_id
+        self.source_name = source_name
+        self.author_id = author_id
+        self.snapshot = snapshot
+        self.target = target
+        self.selected_actions = set(selected_actions)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the command user can use these controls.", ephemeral=True)
+            return
+
+        await execute_backup_load_request(
+            interaction,
+            backup_id=self.backup_id,
+            source_name=self.source_name,
+            snapshot=self.snapshot,
+            target=self.target,
+            selected_actions=self.selected_actions,
+        )
 
 
 class BackupLoadCancelButton(discord.ui.Button["BackupLoadPlannerView"]):
@@ -2019,6 +2252,77 @@ class BackupLoadCancelButton(discord.ui.Button["BackupLoadPlannerView"]):
                 subtitle="No changes were applied.",
                 body="Re-run `/backup load` whenever you want to reopen the planner.",
                 accent_color=EMBED_WARN,
+            )
+        )
+
+
+class BackupLoadReviewView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        *,
+        backup_id: str,
+        source_name: str,
+        author_id: int,
+        snapshot: dict[str, Any],
+        target: discord.Guild,
+        selected_actions: set[str],
+    ) -> None:
+        super().__init__(timeout=300)
+        plan = build_backup_plan_preview(snapshot, target, selected_actions)
+        destructive = any(action in selected_actions for action in BACKUP_DELETE_DEPENDENCIES)
+        risk_label = "Destructive" if destructive else "Non-Destructive"
+        selected_count = len(selected_actions)
+
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay("## `<>` Backup Load Confirmation"),
+                discord.ui.TextDisplay("Final review. The next confirmation is the point where CLINX can touch the live server."),
+                discord.ui.Separator(),
+                discord.ui.Section(
+                    discord.ui.TextDisplay(f"### Backup Vault\n`{backup_id}`"),
+                    discord.ui.TextDisplay(f"### Route\n`{source_name}` -> `{target.name}`"),
+                    accessory=discord.ui.Button(
+                        label=risk_label,
+                        style=discord.ButtonStyle.danger if destructive else discord.ButtonStyle.secondary,
+                        disabled=True,
+                    ),
+                ),
+                discord.ui.Separator(),
+                discord.ui.Section(
+                    discord.ui.TextDisplay(f"### Selected Lanes\n{render_backup_lane_lines(selected_actions)}"),
+                    discord.ui.TextDisplay(f"### Projected Changes\n{render_backup_plan_lines(plan)}"),
+                    accessory=discord.ui.Button(
+                        label=f"{selected_count} staged",
+                        style=discord.ButtonStyle.secondary,
+                        disabled=True,
+                    ),
+                ),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(
+                    "### Final Check\nConfirm once more to start the blue live apply card. If owner approval is required, CLINX will send the public approval request after this step."
+                ),
+                accent_color=BACKUP_PLANNER_ACCENT,
+            )
+        )
+        self.add_item(
+            discord.ui.ActionRow(
+                BackupLoadBackButton(
+                    backup_id=backup_id,
+                    source_name=source_name,
+                    author_id=author_id,
+                    snapshot=snapshot,
+                    target=target,
+                    selected_actions=selected_actions,
+                ),
+                BackupLoadConfirmButton(
+                    backup_id=backup_id,
+                    source_name=source_name,
+                    author_id=author_id,
+                    snapshot=snapshot,
+                    target=target,
+                    selected_actions=selected_actions,
+                ),
+                BackupLoadCancelButton(),
             )
         )
 
@@ -2063,8 +2367,14 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
         plan = build_backup_plan_preview(snapshot, target, self.selected_actions)
         selected_count = len(self.selected_actions)
         run_mode_label = "Wipe + Rebuild" if any(action in self.selected_actions for action in BACKUP_DELETE_DEPENDENCIES) else "Rebuild Only"
+        snapshot_scope = (
+            f"### Snapshot Scope\n"
+            f"• **{len(snapshot.get('roles', []))}** roles in backup\n"
+            f"• **{len(snapshot.get('categories', []))}** categories in backup\n"
+            f"• **{len(snapshot.get('channels', []))}** channels in backup"
+        )
         detail_block = (
-            render_backup_detail_lines(snapshot, target, self.selected_actions, plan)
+            render_backup_detail_lines(snapshot, source_name, target, self.selected_actions, plan)
             if self.detail_mode
             else "**Detail View**\nOpen `View Detail` to inspect the source server, target server, and conflict notes before you run the load."
         )
@@ -2073,7 +2383,7 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
             discord.ui.Container(
                 discord.ui.TextDisplay("## `<>` Backup Load Planner"),
                 discord.ui.TextDisplay(
-                    "Stage the rebuild first. Wipe lanes unlock only when the matching rebuild lane is armed."
+                    "Pick the restore lanes here. Projected changes appear on the next confirmation step, not on this stage."
                 ),
                 discord.ui.Separator(),
                 discord.ui.Section(
@@ -2088,13 +2398,15 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
                 discord.ui.Separator(),
                 discord.ui.Section(
                     discord.ui.TextDisplay(f"### Restore Lanes\n{render_backup_lane_lines(self.selected_actions)}"),
-                    discord.ui.TextDisplay(f"### Projected Changes\n{render_backup_plan_lines(plan)}"),
+                    discord.ui.TextDisplay(snapshot_scope),
                     accessory=discord.ui.Button(
                         label=run_mode_label,
                         style=discord.ButtonStyle.secondary,
                         disabled=True,
                     ),
                 ),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(f"### Settings Payload\n{render_backup_settings_lines(snapshot, self.selected_actions)}"),
                 discord.ui.Separator(),
                 discord.ui.TextDisplay(f"### Safety Locks\n{render_backup_guardrail_lines(self.selected_actions)}"),
                 discord.ui.Separator(),
@@ -2263,7 +2575,7 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
         "created_by_display_name": str(interaction.user),
         "source_guild_id": source.id,
         "source_guild_name": source.name,
-        "snapshot": serialize_guild_snapshot(source),
+        "snapshot": await serialize_guild_snapshot(source),
     }
     register_backup_owner(
         store,
@@ -2424,7 +2736,7 @@ async def restore_missing(interaction: discord.Interaction, source_guild_id: int
         await interaction.followup.send(embed=make_embed("Error", "Could not resolve source or target guild.", EMBED_ERR), ephemeral=True)
         return
 
-    snapshot = serialize_guild_snapshot(source)
+    snapshot = await serialize_guild_snapshot(source, include_assets=False)
     preview = build_restore_missing_preview(snapshot, target)
     preview_lines = [
         f"• **{preview['created_categories']}** missing categories will be created",
@@ -3058,7 +3370,7 @@ async def export_guild(interaction: discord.Interaction) -> None:
         await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
         return
 
-    snapshot = serialize_guild_snapshot(guild)
+    snapshot = await serialize_guild_snapshot(guild)
     await send_text_file(interaction, json.dumps(snapshot, indent=2), f"guild_{guild.id}.json")
 
 
@@ -3072,7 +3384,7 @@ async def export_channels(interaction: discord.Interaction, fmt: app_commands.Ch
         await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
         return
 
-    channels = serialize_guild_snapshot(guild)["channels"]
+    channels = (await serialize_guild_snapshot(guild, include_assets=False))["channels"]
     if fmt.value == "json":
         await send_text_file(interaction, json.dumps(channels, indent=2), f"channels_{guild.id}.json")
         return
