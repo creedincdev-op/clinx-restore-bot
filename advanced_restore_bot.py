@@ -21,6 +21,7 @@ SUPPORT_SERVER_URL = os.getenv("SUPPORT_SERVER_URL", "https://discord.gg/V6YEw2W
 
 DATA_DIR = Path(__file__).parent / "data"
 BACKUP_FILE = DATA_DIR / "backups.json"
+SAFETY_FILE = DATA_DIR / "safety.json"
 
 EMBED_OK = 0x2ECC71
 EMBED_WARN = 0xF1C40F
@@ -28,10 +29,17 @@ EMBED_ERR = 0xE74C3C
 EMBED_INFO = 0x3498DB
 
 IMPORT_JOBS: dict[int, dict[str, Any]] = {}
+PENDING_APPROVALS: dict[int, "PendingApproval"] = {}
 ACTION_DELAY_SECONDS = max(0.0, float(os.getenv("DISCORD_ACTION_DELAY_SECONDS", "1.0")))
 ACTION_RETRY_LIMIT = max(1, int(os.getenv("DISCORD_ACTION_RETRY_LIMIT", "5")))
 ACTION_GATE_LOCK: asyncio.Lock | None = None
 ACTION_LAST_DISPATCH_AT = 0.0
+APPROVAL_TIMEOUT_SECONDS = 120.0
+SAFETY_TIER_PUBLIC = 0
+SAFETY_TIER_SAFE_ADMIN = 1
+SAFETY_TIER_APPROVAL = 2
+SAFETY_TIER_DESTRUCTIVE = 3
+SAFETY_TIER_OWNER_ONLY = 4
 T = TypeVar("T")
 
 
@@ -69,6 +77,8 @@ def ensure_storage() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not BACKUP_FILE.exists():
         BACKUP_FILE.write_text(json.dumps({"backups": {}, "users": {}}, indent=2), encoding="utf-8")
+    if not SAFETY_FILE.exists():
+        SAFETY_FILE.write_text(json.dumps({"guilds": {}}, indent=2), encoding="utf-8")
 
 
 def normalize_backup_store(store: dict[str, Any]) -> dict[str, Any]:
@@ -117,6 +127,76 @@ def save_backup_store(store: dict[str, Any]) -> None:
     ensure_storage()
     normalized = normalize_backup_store(store)
     BACKUP_FILE.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+
+
+def normalize_safety_store(store: dict[str, Any]) -> dict[str, Any]:
+    guilds = store.get("guilds")
+    if not isinstance(guilds, dict):
+        guilds = {}
+    store["guilds"] = guilds
+
+    for guild_key, entry in list(guilds.items()):
+        if not isinstance(entry, dict):
+            entry = {}
+            guilds[guild_key] = entry
+
+        trusted_admin_ids = entry.get("trusted_admin_ids")
+        if not isinstance(trusted_admin_ids, list):
+            trusted_admin_ids = []
+
+        normalized_ids: list[int] = []
+        seen_ids: set[int] = set()
+        for raw_id in trusted_admin_ids:
+            try:
+                trusted_admin_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if trusted_admin_id in seen_ids:
+                continue
+            seen_ids.add(trusted_admin_id)
+            normalized_ids.append(trusted_admin_id)
+
+        entry["trusted_admin_ids"] = normalized_ids
+
+    return store
+
+
+def load_safety_store() -> dict[str, Any]:
+    ensure_storage()
+    store = json.loads(SAFETY_FILE.read_text(encoding="utf-8"))
+    return normalize_safety_store(store)
+
+
+def save_safety_store(store: dict[str, Any]) -> None:
+    ensure_storage()
+    SAFETY_FILE.write_text(json.dumps(normalize_safety_store(store), indent=2), encoding="utf-8")
+
+
+def get_guild_safety_entry(store: dict[str, Any], guild_id: int) -> dict[str, Any]:
+    guilds = store.setdefault("guilds", {})
+    return guilds.setdefault(str(guild_id), {"trusted_admin_ids": []})
+
+
+def get_trusted_admin_ids(guild_id: int) -> set[int]:
+    store = load_safety_store()
+    entry = get_guild_safety_entry(store, guild_id)
+    return {int(user_id) for user_id in entry.get("trusted_admin_ids", [])}
+
+
+def add_trusted_admin(guild_id: int, user_id: int) -> None:
+    store = load_safety_store()
+    entry = get_guild_safety_entry(store, guild_id)
+    trusted_admin_ids = {int(raw_id) for raw_id in entry.get("trusted_admin_ids", [])}
+    trusted_admin_ids.add(int(user_id))
+    entry["trusted_admin_ids"] = sorted(trusted_admin_ids)
+    save_safety_store(store)
+
+
+def remove_trusted_admin(guild_id: int, user_id: int) -> None:
+    store = load_safety_store()
+    entry = get_guild_safety_entry(store, guild_id)
+    entry["trusted_admin_ids"] = [int(raw_id) for raw_id in entry.get("trusted_admin_ids", []) if int(raw_id) != int(user_id)]
+    save_safety_store(store)
 
 
 def register_backup_owner(
@@ -236,6 +316,387 @@ async def user_backup_id_autocomplete(
     return choices
 
 
+def has_administrator_permission(user: discord.abc.User | discord.Member) -> bool:
+    permissions = getattr(user, "guild_permissions", None)
+    return bool(permissions and permissions.administrator)
+
+
+def is_guild_owner(user: discord.abc.User | discord.Member, guild: discord.Guild | None) -> bool:
+    return guild is not None and user.id == guild.owner_id
+
+
+def is_trusted_admin(user_id: int, guild_id: int) -> bool:
+    return user_id in get_trusted_admin_ids(guild_id)
+
+
+def is_trusted_operator(user: discord.abc.User | discord.Member, guild: discord.Guild | None) -> bool:
+    if guild is None:
+        return False
+    if is_guild_owner(user, guild):
+        return True
+    return has_administrator_permission(user) and is_trusted_admin(user.id, guild.id)
+
+
+def get_command_safety_tier(command_name: str, context: dict[str, Any] | None = None) -> int:
+    normalized_name = command_name.casefold().strip()
+    destructive = bool(context and context.get("destructive"))
+    safety_map = {
+        "help": SAFETY_TIER_PUBLIC,
+        "invite": SAFETY_TIER_PUBLIC,
+        "backup create": SAFETY_TIER_SAFE_ADMIN,
+        "backup list": SAFETY_TIER_SAFE_ADMIN,
+        "backup delete": SAFETY_TIER_SAFE_ADMIN,
+        "backup load planner": SAFETY_TIER_SAFE_ADMIN,
+        "backupcreate": SAFETY_TIER_SAFE_ADMIN,
+        "backuplist": SAFETY_TIER_SAFE_ADMIN,
+        "backupload planner": SAFETY_TIER_SAFE_ADMIN,
+        "panel suggestion": SAFETY_TIER_SAFE_ADMIN,
+        "export guild": SAFETY_TIER_SAFE_ADMIN,
+        "export channels": SAFETY_TIER_SAFE_ADMIN,
+        "export roles": SAFETY_TIER_SAFE_ADMIN,
+        "export channel": SAFETY_TIER_SAFE_ADMIN,
+        "export role": SAFETY_TIER_SAFE_ADMIN,
+        "export message": SAFETY_TIER_SAFE_ADMIN,
+        "export reactions": SAFETY_TIER_SAFE_ADMIN,
+        "restore_missing": SAFETY_TIER_APPROVAL,
+        "masschannels": SAFETY_TIER_APPROVAL,
+        "masschannels modal": SAFETY_TIER_SAFE_ADMIN,
+        "import guild": SAFETY_TIER_APPROVAL,
+        "import status": SAFETY_TIER_SAFE_ADMIN,
+        "import cancel": SAFETY_TIER_SAFE_ADMIN,
+        "cleantoday": SAFETY_TIER_DESTRUCTIVE,
+        "leave": SAFETY_TIER_OWNER_ONLY,
+        "safety grant": SAFETY_TIER_OWNER_ONLY,
+        "safety revoke": SAFETY_TIER_OWNER_ONLY,
+        "safety list": SAFETY_TIER_OWNER_ONLY,
+    }
+    if normalized_name in {"backup load", "backupload"}:
+        return SAFETY_TIER_DESTRUCTIVE if destructive else SAFETY_TIER_APPROVAL
+    return safety_map.get(normalized_name, SAFETY_TIER_SAFE_ADMIN)
+
+
+def require_clinx_access(
+    interaction: discord.Interaction,
+    command_name: str,
+    *,
+    context: dict[str, Any] | None = None,
+) -> "ClinxAccessDecision":
+    guild = interaction.guild
+    user = interaction.user
+    tier = get_command_safety_tier(command_name, context)
+
+    if tier == SAFETY_TIER_PUBLIC:
+        return ClinxAccessDecision(tier=tier, direct_allowed=True, requires_owner_approval=False)
+
+    if guild is None:
+        return ClinxAccessDecision(
+            tier=tier,
+            direct_allowed=False,
+            requires_owner_approval=False,
+            denial_message="Run this command in a server.",
+        )
+
+    if is_guild_owner(user, guild):
+        return ClinxAccessDecision(tier=tier, direct_allowed=True, requires_owner_approval=False)
+
+    is_admin = has_administrator_permission(user)
+    trusted_operator = is_trusted_operator(user, guild)
+
+    if tier == SAFETY_TIER_OWNER_ONLY:
+        return ClinxAccessDecision(
+            tier=tier,
+            direct_allowed=False,
+            requires_owner_approval=False,
+            denial_message="Only the server owner can use this CLINX command.",
+        )
+
+    if not is_admin:
+        return ClinxAccessDecision(
+            tier=tier,
+            direct_allowed=False,
+            requires_owner_approval=False,
+            denial_message="Administrator permission is required for this CLINX command.",
+        )
+
+    if tier == SAFETY_TIER_SAFE_ADMIN:
+        return ClinxAccessDecision(tier=tier, direct_allowed=True, requires_owner_approval=False)
+
+    if trusted_operator:
+        return ClinxAccessDecision(tier=tier, direct_allowed=True, requires_owner_approval=False)
+
+    return ClinxAccessDecision(tier=tier, direct_allowed=False, requires_owner_approval=True)
+
+
+async def send_ephemeral_embed(
+    interaction: discord.Interaction,
+    title: str,
+    description: str,
+    color: int = EMBED_INFO,
+) -> None:
+    embed = make_embed(title, description, color, interaction)
+    if interaction.response.is_done():
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+async def enforce_clinx_access(
+    interaction: discord.Interaction,
+    command_name: str,
+    *,
+    context: dict[str, Any] | None = None,
+) -> "ClinxAccessDecision | None":
+    decision = require_clinx_access(interaction, command_name, context=context)
+    if decision.denial_message:
+        await send_ephemeral_embed(interaction, "Access Denied", decision.denial_message, EMBED_ERR)
+        return None
+    return decision
+
+
+def cleanup_pending_approval(guild_id: int) -> None:
+    pending = PENDING_APPROVALS.get(guild_id)
+    if pending is None:
+        return
+    if pending.expires_monotonic <= time.monotonic():
+        PENDING_APPROVALS.pop(guild_id, None)
+
+
+def has_pending_approval(guild_id: int) -> bool:
+    cleanup_pending_approval(guild_id)
+    return guild_id in PENDING_APPROVALS
+
+
+def format_approval_summary(
+    *,
+    requester_id: int,
+    command_name: str,
+    target_name: str,
+    route_text: str | None,
+    scope_title: str,
+    scope_text: str,
+    risk_label: str,
+) -> str:
+    parts = [
+        f"**Requester**\n<@{requester_id}>",
+        f"**Command**\n`/{command_name}`",
+        f"**Target Server**\n`{target_name}`",
+    ]
+    if route_text:
+        parts.append(f"**Route**\n{route_text}")
+    parts.append(f"**{scope_title}**\n{scope_text}")
+    parts.append(f"**Risk**\n`{risk_label}`")
+    return "\n\n".join(parts)
+
+
+def build_approval_embed(
+    pending: "PendingApproval",
+    *,
+    title: str,
+    preview_title: str,
+    preview_body: str,
+    color: int,
+) -> discord.Embed:
+    return make_embed(
+        title,
+        f"{pending.summary_text}\n\n**{preview_title}**\n{preview_body}",
+        color,
+    )
+
+
+async def update_approval_message(
+    message: discord.Message,
+    pending: "PendingApproval",
+    *,
+    title: str,
+    preview_title: str,
+    preview_body: str,
+    color: int,
+    clear_content: bool = False,
+    view: discord.ui.View | None = None,
+) -> None:
+    await message.edit(
+        content=None if clear_content else message.content,
+        embed=build_approval_embed(
+            pending,
+            title=title,
+            preview_title=preview_title,
+            preview_body=preview_body,
+            color=color,
+        ),
+        view=view,
+    )
+
+
+class OwnerApprovalView(discord.ui.View):
+    def __init__(self, *, guild_id: int, owner_id: int, request_id: str) -> None:
+        super().__init__(timeout=APPROVAL_TIMEOUT_SECONDS)
+        self.guild_id = guild_id
+        self.owner_id = owner_id
+        self.request_id = request_id
+        self.message: discord.Message | None = None
+
+    def disable_all_items(self) -> None:
+        for child in self.children:
+            child.disabled = True
+
+    def get_pending(self) -> "PendingApproval | None":
+        cleanup_pending_approval(self.guild_id)
+        pending = PENDING_APPROVALS.get(self.guild_id)
+        if pending is None or pending.request_id != self.request_id:
+            return None
+        return pending
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message("Only the server owner can approve or deny this CLINX request.", ephemeral=True)
+        return False
+
+    async def on_timeout(self) -> None:
+        pending = self.get_pending()
+        if pending is None:
+            return
+
+        PENDING_APPROVALS.pop(self.guild_id, None)
+        self.disable_all_items()
+        if self.message is None:
+            return
+
+        try:
+            await update_approval_message(
+                self.message,
+                pending,
+                title="Owner Approval Expired",
+                preview_title="Request Result",
+                preview_body="No owner approval was received before the request timed out.",
+                color=EMBED_WARN,
+                clear_content=True,
+                view=self,
+            )
+        except discord.HTTPException:
+            pass
+
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
+    async def approve(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        pending = self.get_pending()
+        if pending is None:
+            await interaction.response.send_message("This CLINX approval request is no longer active.", ephemeral=True)
+            return
+
+        PENDING_APPROVALS.pop(self.guild_id, None)
+        self.disable_all_items()
+        await interaction.response.edit_message(
+            content=None,
+            embed=build_approval_embed(
+                pending,
+                title="Owner Approval Granted",
+                preview_title="Execution State",
+                preview_body="CLINX is running the approved action now.",
+                color=BACKUP_PLANNER_ACCENT,
+            ),
+            view=self,
+        )
+
+        try:
+            await pending.execute(interaction.message)
+        except Exception as exc:
+            try:
+                await update_approval_message(
+                    interaction.message,
+                    pending,
+                    title="Approved Action Failed",
+                    preview_title="Failure Details",
+                    preview_body=f"`{exc}`",
+                    color=EMBED_ERR,
+                    clear_content=True,
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
+    async def deny(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        pending = self.get_pending()
+        if pending is None:
+            await interaction.response.send_message("This CLINX approval request is no longer active.", ephemeral=True)
+            return
+
+        PENDING_APPROVALS.pop(self.guild_id, None)
+        self.disable_all_items()
+        await interaction.response.edit_message(
+            content=None,
+            embed=build_approval_embed(
+                pending,
+                title="Owner Approval Denied",
+                preview_title="Request Result",
+                preview_body="The server owner denied this action. Nothing was changed.",
+                color=EMBED_ERR,
+            ),
+            view=self,
+        )
+
+
+async def queue_owner_approval(
+    interaction: discord.Interaction,
+    *,
+    command_name: str,
+    tier: int,
+    risk_label: str,
+    summary_text: str,
+    preview_title: str,
+    preview_body: str,
+    execute: Callable[[discord.Message], Awaitable[None]],
+) -> "PendingApproval | None":
+    guild = interaction.guild
+    channel = interaction.channel
+    if guild is None or channel is None or not hasattr(channel, "send"):
+        await send_ephemeral_embed(interaction, "Approval Error", "CLINX could not open an owner approval request in this channel.", EMBED_ERR)
+        return None
+
+    if has_pending_approval(guild.id):
+        pending = PENDING_APPROVALS[guild.id]
+        await send_ephemeral_embed(
+            interaction,
+            "Approval Pending",
+            f"`/{pending.command_name}` is already waiting for the server owner in this guild. Resolve that request first.",
+            EMBED_WARN,
+        )
+        return None
+
+    pending = PendingApproval(
+        request_id=secrets.token_hex(4).upper(),
+        guild_id=guild.id,
+        owner_id=guild.owner_id,
+        requester_id=interaction.user.id,
+        command_name=command_name,
+        tier=tier,
+        risk_label=risk_label,
+        summary_text=summary_text,
+        preview_title=preview_title,
+        preview_body=preview_body,
+        execute=execute,
+        created_monotonic=time.monotonic(),
+        expires_monotonic=time.monotonic() + APPROVAL_TIMEOUT_SECONDS,
+    )
+    view = OwnerApprovalView(guild_id=guild.id, owner_id=guild.owner_id, request_id=pending.request_id)
+    approval_message = await channel.send(
+        content=f"<@{guild.owner_id}> CLINX approval required for <@{interaction.user.id}>.",
+        embed=build_approval_embed(
+            pending,
+            title="Owner Approval Required",
+            preview_title=preview_title,
+            preview_body=preview_body,
+            color=EMBED_WARN if tier == SAFETY_TIER_APPROVAL else EMBED_ERR,
+        ),
+        view=view,
+        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+    )
+    view.message = approval_message
+    pending.message_id = approval_message.id
+    PENDING_APPROVALS[guild.id] = pending
+    return pending
+
+
 @dataclass
 class ParsedChannel:
     kind: str
@@ -256,6 +717,32 @@ class LayoutLine:
     raw: str
     text: str
     indent: int
+
+
+@dataclass
+class ClinxAccessDecision:
+    tier: int
+    direct_allowed: bool
+    requires_owner_approval: bool
+    denial_message: str | None = None
+
+
+@dataclass
+class PendingApproval:
+    request_id: str
+    guild_id: int
+    owner_id: int
+    requester_id: int
+    command_name: str
+    tier: int
+    risk_label: str
+    summary_text: str
+    preview_title: str
+    preview_body: str
+    execute: Callable[[discord.Message], Awaitable[None]]
+    created_monotonic: float
+    expires_monotonic: float
+    message_id: int | None = None
 
 
 COMMAND_PAGE_SIZE = 5
@@ -283,7 +770,7 @@ BACKUP_DELETE_DEPENDENCIES = {
 COMMAND_LIBRARY: dict[str, list[LibraryCommand]] = {
     "Backup": [
         LibraryCommand("backup create", "Create a fresh server backup and return its load ID.", "Snapshots the selected source guild, stores it in the CLINX backup DB, and tags the creator in the backup record."),
-        LibraryCommand("backup load", "Open the restore planner for one of your backups.", "The load ID field autocompletes only backups created by your account and then opens the paced restore planner."),
+        LibraryCommand("backup load", "Open the restore planner for one of your backups.", "The load ID field autocompletes only backups created by your account. Untrusted admins need owner approval before protected restore plans execute."),
         LibraryCommand("backup list", "Show only the backups created by your account.", "Lists your own recent backup IDs with source guild names and exact creation timestamps."),
         LibraryCommand("backup delete", "Delete one of your backup codes from the DB.", "Removes a backup only if it belongs to your account and unregisters it from your stored backup list."),
         LibraryCommand("backupcreate", "Alias of /backup create.", "Shortcut alias for fast backup creation."),
@@ -291,10 +778,10 @@ COMMAND_LIBRARY: dict[str, list[LibraryCommand]] = {
         LibraryCommand("backuplist", "Alias of /backup list.", "Shortcut alias for opening your private backup list anywhere CLINX is installed."),
     ],
     "Transfer": [
-        LibraryCommand("restore_missing", "Create only missing categories and channels.", "Compares the source guild snapshot against the target guild and creates only what is absent."),
+        LibraryCommand("restore_missing", "Create only missing categories and channels.", "Compares the source guild snapshot against the target guild and creates only what is absent. Untrusted admins need owner approval."),
         LibraryCommand("cleantoday", "Delete channels created today.", "Runs as a dry-run first unless confirm is enabled, then deletes only channels created on the current UTC date."),
-        LibraryCommand("masschannels", "Open the bulk layout importer modal.", "Paste one or two large layout blocks and CLINX will infer categories, text channels, voice channels, and channel topics."),
-        LibraryCommand("panel suggestion", "Post the public suggestion board.", "Sends a public CLINX suggestion board to the current channel while keeping the command acknowledgement private."),
+        LibraryCommand("masschannels", "Open the bulk layout importer modal.", "Paste one or two large layout blocks and CLINX will infer categories, text channels, voice channels, and channel topics. Untrusted admins need owner approval to execute."),
+        LibraryCommand("panel suggestion", "Post the public suggestion board.", "Sends a public CLINX suggestion board to the current channel while keeping the command acknowledgement private. Admin access is required."),
     ],
     "Data": [
         LibraryCommand("export guild", "Export the full guild snapshot as JSON.", "Includes categories, channels, settings, and roles in one file."),
@@ -311,7 +798,10 @@ COMMAND_LIBRARY: dict[str, list[LibraryCommand]] = {
     "Utility": [
         LibraryCommand("help", "Open the CLINX command library.", "Shows this interactive command browser with categories, paging, and detailed command notes."),
         LibraryCommand("invite", "Generate the bot invite link.", "Builds the current CLINX OAuth2 invite using the active application ID."),
-        LibraryCommand("leave", "Make CLINX leave the current server.", "Only for admins when you intentionally want the bot removed from a guild."),
+        LibraryCommand("leave", "Make CLINX leave the current server.", "Only the server owner can use this when you intentionally want the bot removed from a guild."),
+        LibraryCommand("safety grant", "Owner-only: trust an admin for protected CLINX actions.", "Adds a guild-specific trusted admin who can bypass owner approval for Tier 2 and Tier 3 actions."),
+        LibraryCommand("safety revoke", "Owner-only: remove trusted admin access.", "Removes a guild-specific trusted admin from the CLINX safety allowlist."),
+        LibraryCommand("safety list", "Owner-only: list the CLINX trusted admins.", "Shows which members in the current guild can bypass owner approval for protected actions."),
     ],
 }
 
@@ -913,6 +1403,71 @@ async def create_mass_channels_from_layout(
     return result
 
 
+def preview_mass_channels_layout(
+    guild: discord.Guild,
+    layout: str,
+    *,
+    create_categories: bool,
+) -> dict[str, int]:
+    items = parse_layout(layout)
+    if not items:
+        raise ValueError("No valid channels found in layout.")
+
+    result = {
+        "created_categories": 0,
+        "created_channels": 0,
+        "skipped_channels": 0,
+    }
+
+    category_cache: set[str] = {category.name for category in guild.categories}
+    seen_channels: set[tuple[str | None, str]] = set()
+
+    for item in items:
+        if item.category and item.category not in category_cache and create_categories:
+            category_cache.add(item.category)
+            result["created_categories"] += 1
+
+        channel_key = (item.category, item.name)
+        if channel_key in seen_channels:
+            result["skipped_channels"] += 1
+            continue
+        seen_channels.add(channel_key)
+
+        existing_channel = discord.utils.get(guild.channels, name=item.name)
+        if existing_channel is not None:
+            existing_category = existing_channel.category.name if isinstance(existing_channel, (discord.TextChannel, discord.VoiceChannel)) and existing_channel.category else None
+            if existing_category == item.category or existing_category is None:
+                result["skipped_channels"] += 1
+                continue
+
+        result["created_channels"] += 1
+
+    return result
+
+
+def build_restore_missing_preview(snapshot: dict[str, Any], target: discord.Guild) -> dict[str, int]:
+    preview = {
+        "created_categories": 0,
+        "created_channels": 0,
+        "conflicting_channels": 0,
+    }
+    existing_categories = {category.name for category in target.categories}
+    existing_channels = {channel.name: channel for channel in target.channels}
+
+    for category_data in snapshot.get("categories", []):
+        if category_data["name"] not in existing_categories:
+            preview["created_categories"] += 1
+
+    for channel_data in snapshot.get("channels", []):
+        existing = existing_channels.get(channel_data["name"])
+        if existing is None:
+            preview["created_channels"] += 1
+        elif str(existing.type) != channel_data["type"]:
+            preview["conflicting_channels"] += 1
+
+    return preview
+
+
 def build_backup_plan_preview(snapshot: dict[str, Any], target: discord.Guild, selected_actions: set[str]) -> dict[str, int]:
     target_roles = [role for role in target.roles if not role.managed and not role.is_default()]
     target_channels = list(target.channels)
@@ -1094,6 +1649,116 @@ def build_backup_operation_embed(
     )
 
 
+async def run_backup_load_operation(
+    *,
+    backup_id: str,
+    source_name: str,
+    snapshot: dict[str, Any],
+    target: discord.Guild,
+    selected_actions: set[str],
+    private_interaction: discord.Interaction | None = None,
+    public_status_message: discord.Message | None = None,
+) -> None:
+    plan = build_backup_plan_preview(snapshot, target, selected_actions)
+
+    if private_interaction is not None:
+        await private_interaction.edit_original_response(
+            view=BackupLoadStatusView(
+                title="## `<>` Applying Backup",
+                subtitle=f"CLINX is rebuilding `{target.name}` from backup `{backup_id}`.",
+                body="Write pacing is active. Roles, channels, and server settings are being restored in a controlled sequence to avoid Discord rate spikes.",
+                accent_color=BACKUP_PLANNER_ACCENT,
+            )
+        )
+
+    if public_status_message is not None:
+        await public_status_message.edit(
+            content=None,
+            embed=build_backup_operation_embed(
+                title="Backup Load Started",
+                backup_id=backup_id,
+                source_name=source_name,
+                target_name=target.name,
+                selected_actions=selected_actions,
+                changes_title="Planned Changes",
+                changes_body=render_backup_plan_lines(plan),
+                color=BACKUP_PLANNER_ACCENT,
+            ),
+            view=None,
+        )
+
+    try:
+        stats = await apply_snapshot_to_guild(
+            snapshot,
+            target,
+            delete_roles="delete_roles" in selected_actions,
+            delete_channels="delete_channels" in selected_actions,
+            load_roles="load_roles" in selected_actions,
+            load_channels="load_channels" in selected_actions,
+            load_settings="load_settings" in selected_actions,
+            create_only_missing=False,
+        )
+    except Exception as exc:
+        if public_status_message is not None:
+            try:
+                await public_status_message.edit(
+                    embed=build_backup_operation_embed(
+                        title="Backup Load Failed",
+                        backup_id=backup_id,
+                        source_name=source_name,
+                        target_name=target.name,
+                        selected_actions=selected_actions,
+                        changes_title="Failure Details",
+                        changes_body=f"`{exc}`",
+                        color=EMBED_ERR,
+                    ),
+                    view=None,
+                )
+            except discord.HTTPException:
+                pass
+        if private_interaction is not None:
+            await private_interaction.edit_original_response(
+                view=BackupLoadStatusView(
+                    title="## `x` Backup Load Failed",
+                    subtitle=f"Backup `{backup_id}` did not finish cleanly.",
+                    body=f"`{exc}`",
+                    accent_color=EMBED_ERR,
+                )
+            )
+        if private_interaction is not None:
+            raise
+        return
+
+    result_body = render_backup_result_lines(stats)
+    if public_status_message is not None:
+        try:
+            await public_status_message.edit(
+                embed=build_backup_operation_embed(
+                    title="Backup Load Complete",
+                    backup_id=backup_id,
+                    source_name=source_name,
+                    target_name=target.name,
+                    selected_actions=selected_actions,
+                    changes_title="Applied Changes",
+                    changes_body=result_body,
+                    color=EMBED_OK,
+                ),
+                view=None,
+            )
+        except discord.HTTPException:
+            pass
+
+    if private_interaction is not None:
+        await private_interaction.edit_original_response(
+            view=BackupLoadStatusView(
+                title="## `<>` Backup Rebuild Complete",
+                subtitle=f"`{target.name}` now matches the selected lanes from backup `{backup_id}`.",
+                body=result_body,
+                accent_color=EMBED_OK,
+            )
+        )
+
+
 def render_backup_detail_lines(snapshot: dict[str, Any], target: discord.Guild, selected_actions: set[str], plan: dict[str, int]) -> str:
     detail_lines = [
         f"**Source Server**\n`{snapshot.get('source_guild_name', 'Unknown Source')}`",
@@ -1234,7 +1899,73 @@ class BackupLoadContinueButton(discord.ui.Button["BackupLoadPlannerView"]):
             await interaction.response.send_message("Only the command user can use these controls.", ephemeral=True)
             return
 
+        destructive = any(action in self.selected_actions for action in BACKUP_DELETE_DEPENDENCIES)
+        decision = require_clinx_access(
+            interaction,
+            "backup load",
+            context={"destructive": destructive},
+        )
+        if decision.denial_message:
+            await interaction.response.send_message(decision.denial_message, ephemeral=True)
+            return
+
         plan = build_backup_plan_preview(self.snapshot, self.target, self.selected_actions)
+        if decision.requires_owner_approval:
+            route_text = f"`{self.source_name}` -> `{self.target.name}`"
+            risk_label = "Destructive" if destructive else "Non-Destructive"
+            summary_text = format_approval_summary(
+                requester_id=interaction.user.id,
+                command_name="backup load",
+                target_name=self.target.name,
+                route_text=route_text,
+                scope_title="Selected Actions",
+                scope_text=", ".join(BACKUP_ACTION_LABELS[action] for action in BACKUP_ACTION_ORDER if action in self.selected_actions) or "No actions selected",
+                risk_label=risk_label,
+            )
+            if has_pending_approval(interaction.guild.id):
+                await interaction.response.send_message("Another protected CLINX request is already waiting for the owner in this server.", ephemeral=True)
+                return
+            await interaction.response.edit_message(
+                view=BackupLoadStatusView(
+                    title="## `<>` Waiting For Owner Approval",
+                    subtitle="The restore plan is staged and waiting for the server owner.",
+                    body="CLINX will execute this backup load only after the owner approves the public request card in this channel.",
+                    accent_color=EMBED_WARN,
+                )
+            )
+
+            async def execute_backup_load(message: discord.Message) -> None:
+                await run_backup_load_operation(
+                    backup_id=self.backup_id,
+                    source_name=self.source_name,
+                    snapshot=self.snapshot,
+                    target=self.target,
+                    selected_actions=set(self.selected_actions),
+                    public_status_message=message,
+                )
+
+            queued = await queue_owner_approval(
+                interaction,
+                command_name="backup load",
+                tier=decision.tier,
+                risk_label=risk_label,
+                summary_text=summary_text,
+                preview_title="Planned Changes",
+                preview_body=render_backup_plan_lines(plan),
+                execute=execute_backup_load,
+            )
+            if queued is None:
+                await interaction.edit_original_response(
+                    view=BackupLoadStatusView(
+                        title="## `x` Approval Request Failed",
+                        subtitle="CLINX could not queue the owner approval request.",
+                        body="Resolve any existing approval card in this guild, then reopen the planner and try again.",
+                        accent_color=EMBED_ERR,
+                    )
+                )
+                return
+            return
+
         await interaction.response.edit_message(
             view=BackupLoadStatusView(
                 title="## `<>` Applying Backup",
@@ -1243,7 +1974,6 @@ class BackupLoadContinueButton(discord.ui.Button["BackupLoadPlannerView"]):
                 accent_color=BACKUP_PLANNER_ACCENT,
             )
         )
-
         public_status_message: discord.Message | None = None
         channel = interaction.channel
         if interaction.guild is not None and channel is not None and hasattr(channel, "send"):
@@ -1265,68 +1995,17 @@ class BackupLoadContinueButton(discord.ui.Button["BackupLoadPlannerView"]):
                 public_status_message = None
 
         try:
-            stats = await apply_snapshot_to_guild(
-                self.snapshot,
-                self.target,
-                delete_roles="delete_roles" in self.selected_actions,
-                delete_channels="delete_channels" in self.selected_actions,
-                load_roles="load_roles" in self.selected_actions,
-                load_channels="load_channels" in self.selected_actions,
-                load_settings="load_settings" in self.selected_actions,
-                create_only_missing=False,
+            await run_backup_load_operation(
+                backup_id=self.backup_id,
+                source_name=self.source_name,
+                snapshot=self.snapshot,
+                target=self.target,
+                selected_actions=self.selected_actions,
+                private_interaction=interaction,
+                public_status_message=public_status_message,
             )
-        except Exception as exc:
-            if public_status_message is not None:
-                try:
-                    await public_status_message.edit(
-                        embed=build_backup_operation_embed(
-                            title="Backup Load Failed",
-                            backup_id=self.backup_id,
-                            source_name=self.source_name,
-                            target_name=self.target.name,
-                            selected_actions=self.selected_actions,
-                            changes_title="Failure Details",
-                            changes_body=f"`{exc}`",
-                            color=EMBED_ERR,
-                        )
-                    )
-                except discord.HTTPException:
-                    pass
-            await interaction.edit_original_response(
-                view=BackupLoadStatusView(
-                    title="## `x` Backup Load Failed",
-                    subtitle=f"Backup `{self.backup_id}` did not finish cleanly.",
-                    body=f"`{exc}`",
-                    accent_color=EMBED_ERR,
-                )
-            )
+        except Exception:
             return
-
-        result_body = render_backup_result_lines(stats)
-        if public_status_message is not None:
-            try:
-                await public_status_message.edit(
-                    embed=build_backup_operation_embed(
-                        title="Backup Load Complete",
-                        backup_id=self.backup_id,
-                        source_name=self.source_name,
-                        target_name=self.target.name,
-                        selected_actions=self.selected_actions,
-                        changes_title="Applied Changes",
-                        changes_body=result_body,
-                        color=EMBED_OK,
-                    )
-                )
-            except discord.HTTPException:
-                pass
-        await interaction.edit_original_response(
-            view=BackupLoadStatusView(
-                title="## `<>` Backup Rebuild Complete",
-                subtitle=f"`{self.target.name}` now matches the selected lanes from backup `{self.backup_id}`.",
-                body=result_body,
-                accent_color=EMBED_OK,
-            )
-        )
 
 
 class BackupLoadCancelButton(discord.ui.Button["BackupLoadPlannerView"]):
@@ -1525,6 +2204,7 @@ class ClinxBot(commands.Bot):
             self.tree.add_command(export_group)
             self.tree.add_command(import_group)
             self.tree.add_command(panel_group)
+            self.tree.add_command(safety_group)
             self._groups_added = True
 
         if not self._persistent_views_added:
@@ -1543,6 +2223,7 @@ backup_group = app_commands.Group(name="backup", description="Backup and restore
 export_group = app_commands.Group(name="export", description="Export server objects")
 import_group = app_commands.Group(name="import", description="Import server objects")
 panel_group = app_commands.Group(name="panel", description="Send styled embed panels")
+safety_group = app_commands.Group(name="safety", description="Owner-only CLINX safety controls")
 
 
 @bot.event
@@ -1564,6 +2245,8 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 @app_commands.describe(source_guild_id="Guild ID to backup (optional)")
 @app_commands.default_permissions(administrator=True)
 async def backup_create(interaction: discord.Interaction, source_guild_id: int | None = None) -> None:
+    if await enforce_clinx_access(interaction, "backup create") is None:
+        return
     await interaction.response.defer(ephemeral=True, thinking=True)
 
     source = interaction.guild if source_guild_id is None else bot.get_guild(source_guild_id)
@@ -1604,6 +2287,8 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
 @app_commands.describe(load_id="Backup load ID", target_guild_id="Target guild ID (optional)")
 @app_commands.default_permissions(administrator=True)
 async def backup_load(interaction: discord.Interaction, load_id: str, target_guild_id: int | None = None) -> None:
+    if await enforce_clinx_access(interaction, "backup load planner") is None:
+        return
     await interaction.response.defer(ephemeral=True, thinking=True)
 
     store = load_backup_store()
@@ -1636,6 +2321,8 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
 @backup_group.command(name="list", description="List saved backup IDs")
 @app_commands.default_permissions(administrator=True)
 async def backup_list(interaction: discord.Interaction) -> None:
+    if await enforce_clinx_access(interaction, "backup list") is None:
+        return
     store = load_backup_store()
     entries = get_user_backup_records(store, interaction.user.id)[:20]
     if not entries:
@@ -1654,6 +2341,8 @@ async def backup_list(interaction: discord.Interaction) -> None:
 @app_commands.describe(load_id="Backup load ID")
 @app_commands.default_permissions(administrator=True)
 async def backup_delete(interaction: discord.Interaction, load_id: str) -> None:
+    if await enforce_clinx_access(interaction, "backup delete") is None:
+        return
     store = load_backup_store()
     record = store.get("backups", {}).get(load_id)
     if record is None:
@@ -1722,6 +2411,9 @@ async def backuplist_alias(interaction: discord.Interaction) -> None:
 @app_commands.describe(source_guild_id="Source guild ID", target_guild_id="Target guild ID")
 @app_commands.default_permissions(administrator=True)
 async def restore_missing(interaction: discord.Interaction, source_guild_id: int | None = None, target_guild_id: int | None = None) -> None:
+    decision = await enforce_clinx_access(interaction, "restore_missing")
+    if decision is None:
+        return
     await interaction.response.defer(thinking=True)
 
     resolved_source = source_guild_id or resolve_default_backup_guild_id()
@@ -1733,6 +2425,82 @@ async def restore_missing(interaction: discord.Interaction, source_guild_id: int
         return
 
     snapshot = serialize_guild_snapshot(source)
+    preview = build_restore_missing_preview(snapshot, target)
+    preview_lines = [
+        f"• **{preview['created_categories']}** missing categories will be created",
+        f"• **{preview['created_channels']}** missing channels will be created",
+    ]
+    if preview["conflicting_channels"]:
+        preview_lines.append(f"• **{preview['conflicting_channels']}** channel names already exist with a different type and will be skipped")
+
+    if decision.requires_owner_approval:
+        pending_ref: dict[str, PendingApproval] = {}
+
+        async def execute_restore_missing(message: discord.Message) -> None:
+            pending = pending_ref["value"]
+            try:
+                stats = await apply_snapshot_to_guild(
+                    snapshot,
+                    target,
+                    delete_roles=False,
+                    delete_channels=False,
+                    load_roles=False,
+                    load_channels=True,
+                    load_settings=False,
+                    create_only_missing=True,
+                )
+                await update_approval_message(
+                    message,
+                    pending,
+                    title="Approved Restore Missing Complete",
+                    preview_title="Applied Changes",
+                    preview_body=(
+                        f"• **{stats['created_categories']}** categories created\n"
+                        f"• **{stats['created_channels']}** channels created"
+                    ),
+                    color=EMBED_OK,
+                    clear_content=True,
+                    view=None,
+                )
+            except Exception as exc:
+                await update_approval_message(
+                    message,
+                    pending,
+                    title="Approved Restore Missing Failed",
+                    preview_title="Failure Details",
+                    preview_body=f"`{exc}`",
+                    color=EMBED_ERR,
+                    clear_content=True,
+                    view=None,
+                )
+
+        queued = await queue_owner_approval(
+            interaction,
+            command_name="restore_missing",
+            tier=decision.tier,
+            risk_label="Non-Destructive",
+            summary_text=format_approval_summary(
+                requester_id=interaction.user.id,
+                command_name="restore_missing",
+                target_name=target.name,
+                route_text=f"`{source.name}` -> `{target.name}`",
+                scope_title="Request Scope",
+                scope_text="Create only missing categories and channels from the source snapshot.",
+                risk_label="Non-Destructive",
+            ),
+            preview_title="Planned Changes",
+            preview_body="\n".join(preview_lines),
+            execute=execute_restore_missing,
+        )
+        if queued is None:
+            return
+        pending_ref["value"] = queued
+        await interaction.followup.send(
+            embed=make_embed("Approval Requested", "The server owner must approve this restore request before CLINX will run it.", EMBED_INFO),
+            ephemeral=True,
+        )
+        return
+
     stats = await apply_snapshot_to_guild(
         snapshot,
         target,
@@ -1756,6 +2524,9 @@ async def restore_missing(interaction: discord.Interaction, source_guild_id: int
 @bot.tree.command(name="cleantoday", description="Delete channels created today (UTC)")
 @app_commands.default_permissions(administrator=True)
 async def cleantoday(interaction: discord.Interaction, confirm: bool = False) -> None:
+    decision = await enforce_clinx_access(interaction, "cleantoday")
+    if decision is None:
+        return
     await interaction.response.defer(thinking=True)
 
     guild = interaction.guild
@@ -1776,6 +2547,68 @@ async def cleantoday(interaction: discord.Interaction, confirm: bool = False) ->
         )
         return
 
+    if decision.requires_owner_approval:
+        pending_ref: dict[str, PendingApproval] = {}
+
+        async def execute_clean_today(message: discord.Message) -> None:
+            pending = pending_ref["value"]
+            deleted = 0
+            try:
+                for channel in targets:
+                    try:
+                        await throttled_discord_call(lambda channel=channel: channel.delete(reason=f"/cleantoday by {interaction.user}"))
+                        deleted += 1
+                    except (discord.Forbidden, discord.HTTPException):
+                        continue
+                await update_approval_message(
+                    message,
+                    pending,
+                    title="Approved Clean Today Complete",
+                    preview_title="Applied Changes",
+                    preview_body=f"• **{deleted}** channels created today were deleted.",
+                    color=EMBED_OK,
+                    clear_content=True,
+                    view=None,
+                )
+            except Exception as exc:
+                await update_approval_message(
+                    message,
+                    pending,
+                    title="Approved Clean Today Failed",
+                    preview_title="Failure Details",
+                    preview_body=f"`{exc}`",
+                    color=EMBED_ERR,
+                    clear_content=True,
+                    view=None,
+                )
+
+        queued = await queue_owner_approval(
+            interaction,
+            command_name="cleantoday",
+            tier=decision.tier,
+            risk_label="Destructive",
+            summary_text=format_approval_summary(
+                requester_id=interaction.user.id,
+                command_name="cleantoday",
+                target_name=guild.name,
+                route_text=None,
+                scope_title="Request Scope",
+                scope_text="Delete every channel in this guild that was created today (UTC).",
+                risk_label="Destructive",
+            ),
+            preview_title="Planned Changes",
+            preview_body=f"• **{len(targets)}** channels created today (UTC) are queued for deletion.",
+            execute=execute_clean_today,
+        )
+        if queued is None:
+            return
+        pending_ref["value"] = queued
+        await interaction.followup.send(
+            embed=make_embed("Approval Requested", "The server owner must approve this cleanup request before CLINX will delete anything.", EMBED_INFO),
+            ephemeral=True,
+        )
+        return
+
     deleted = 0
     for ch in targets:
         try:
@@ -1783,7 +2616,7 @@ async def cleantoday(interaction: discord.Interaction, confirm: bool = False) ->
                 lambda ch=ch: ch.delete(reason=f"/cleantoday by {interaction.user}")
             )
             deleted += 1
-        except discord.Forbidden:
+        except (discord.Forbidden, discord.HTTPException):
             pass
 
     await interaction.followup.send(embed=make_embed("Clean Today Complete", f"Deleted `{deleted}` channels.", EMBED_OK))
@@ -1809,6 +2642,9 @@ class MassChannelsModal(discord.ui.Modal, title="Mass Channel Creator"):
         self.create_categories = create_categories
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        decision = await enforce_clinx_access(interaction, "masschannels")
+        if decision is None:
+            return
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message(embed=make_embed("Error", "Run this command in a server.", EMBED_ERR), ephemeral=True)
@@ -1820,7 +2656,7 @@ class MassChannelsModal(discord.ui.Modal, title="Mass Channel Creator"):
             layout = f"{layout}\n{self.extra_layout_input.value}"
 
         try:
-            stats = await create_mass_channels_from_layout(
+            preview = preview_mass_channels_layout(
                 guild,
                 layout,
                 create_categories=self.create_categories,
@@ -1828,6 +2664,80 @@ class MassChannelsModal(discord.ui.Modal, title="Mass Channel Creator"):
         except ValueError as exc:
             await interaction.followup.send(embed=make_embed("Mass Channels", str(exc), EMBED_ERR), ephemeral=True)
             return
+
+        if decision.requires_owner_approval:
+            pending_ref: dict[str, PendingApproval] = {}
+
+            async def execute_mass_channels(message: discord.Message) -> None:
+                pending = pending_ref["value"]
+                try:
+                    stats = await create_mass_channels_from_layout(
+                        guild,
+                        layout,
+                        create_categories=self.create_categories,
+                    )
+                    await update_approval_message(
+                        message,
+                        pending,
+                        title="Approved Mass Create Complete",
+                        preview_title="Applied Changes",
+                        preview_body=(
+                            f"• **{stats['created_categories']}** categories created\n"
+                            f"• **{stats['created_channels']}** channels created\n"
+                            f"• **{stats['skipped_channels']}** duplicate or existing entries skipped"
+                        ),
+                        color=EMBED_OK,
+                        clear_content=True,
+                        view=None,
+                    )
+                except Exception as exc:
+                    await update_approval_message(
+                        message,
+                        pending,
+                        title="Approved Mass Create Failed",
+                        preview_title="Failure Details",
+                        preview_body=f"`{exc}`",
+                        color=EMBED_ERR,
+                        clear_content=True,
+                        view=None,
+                    )
+
+            queued = await queue_owner_approval(
+                interaction,
+                command_name="masschannels",
+                tier=decision.tier,
+                risk_label="Non-Destructive",
+                summary_text=format_approval_summary(
+                    requester_id=interaction.user.id,
+                    command_name="masschannels",
+                    target_name=guild.name,
+                    route_text=None,
+                    scope_title="Request Scope",
+                    scope_text="Create categories and channels from the submitted layout block.",
+                    risk_label="Non-Destructive",
+                ),
+                preview_title="Planned Changes",
+                preview_body=(
+                    f"• **{preview['created_categories']}** categories will be created\n"
+                    f"• **{preview['created_channels']}** channels will be created\n"
+                    f"• **{preview['skipped_channels']}** duplicate or existing entries will be skipped"
+                ),
+                execute=execute_mass_channels,
+            )
+            if queued is None:
+                return
+            pending_ref["value"] = queued
+            await interaction.followup.send(
+                embed=make_embed("Approval Requested", "The server owner must approve this mass channel request before CLINX will create anything.", EMBED_INFO),
+                ephemeral=True,
+            )
+            return
+
+        stats = await create_mass_channels_from_layout(
+            guild,
+            layout,
+            create_categories=self.create_categories,
+        )
 
         summary = (
             f"Created categories: `{stats['created_categories']}`\n"
@@ -1840,6 +2750,8 @@ class MassChannelsModal(discord.ui.Modal, title="Mass Channel Creator"):
 @bot.tree.command(name="masschannels", description="Open the bulk channel creator modal")
 @app_commands.default_permissions(administrator=True)
 async def masschannels(interaction: discord.Interaction, create_categories: bool = True) -> None:
+    if await enforce_clinx_access(interaction, "masschannels modal") is None:
+        return
     if interaction.guild is None:
         await interaction.response.send_message(embed=make_embed("Error", "Run this command in a server.", EMBED_ERR), ephemeral=True)
         return
@@ -2120,6 +3032,8 @@ class CommandLibraryView(discord.ui.LayoutView):
 
 @panel_group.command(name="suggestion", description="Post the public suggestion board")
 async def panel_suggestion(interaction: discord.Interaction) -> None:
+    if await enforce_clinx_access(interaction, "panel suggestion") is None:
+        return
     channel = interaction.channel
     if channel is None:
         await interaction.response.send_message("Channel not available.", ephemeral=True)
@@ -2137,6 +3051,8 @@ async def send_text_file(interaction: discord.Interaction, text: str, filename: 
 
 @export_group.command(name="guild", description="Export full guild snapshot as JSON")
 async def export_guild(interaction: discord.Interaction) -> None:
+    if await enforce_clinx_access(interaction, "export guild") is None:
+        return
     guild = interaction.guild
     if guild is None:
         await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
@@ -2149,6 +3065,8 @@ async def export_guild(interaction: discord.Interaction) -> None:
 @export_group.command(name="channels", description="Export channels as JSON or CSV")
 @app_commands.choices(fmt=[app_commands.Choice(name="json", value="json"), app_commands.Choice(name="csv", value="csv")])
 async def export_channels(interaction: discord.Interaction, fmt: app_commands.Choice[str]) -> None:
+    if await enforce_clinx_access(interaction, "export channels") is None:
+        return
     guild = interaction.guild
     if guild is None:
         await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
@@ -2170,6 +3088,8 @@ async def export_channels(interaction: discord.Interaction, fmt: app_commands.Ch
 @export_group.command(name="roles", description="Export all roles as JSON or CSV")
 @app_commands.choices(fmt=[app_commands.Choice(name="json", value="json"), app_commands.Choice(name="csv", value="csv")])
 async def export_roles(interaction: discord.Interaction, fmt: app_commands.Choice[str]) -> None:
+    if await enforce_clinx_access(interaction, "export roles") is None:
+        return
     guild = interaction.guild
     if guild is None:
         await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
@@ -2194,6 +3114,8 @@ async def export_channel(
     interaction: discord.Interaction,
     channel: discord.TextChannel | discord.VoiceChannel | discord.CategoryChannel,
 ) -> None:
+    if await enforce_clinx_access(interaction, "export channel") is None:
+        return
     payload: dict[str, Any] = {
         "id": channel.id,
         "name": channel.name,
@@ -2210,6 +3132,8 @@ async def export_channel(
 
 @export_group.command(name="role", description="Export one role as JSON")
 async def export_role(interaction: discord.Interaction, role: discord.Role) -> None:
+    if await enforce_clinx_access(interaction, "export role") is None:
+        return
     payload = {
         "id": role.id,
         "name": role.name,
@@ -2222,6 +3146,8 @@ async def export_role(interaction: discord.Interaction, role: discord.Role) -> N
     await send_text_file(interaction, json.dumps(payload, indent=2), f"role_{role.id}.json")
 @export_group.command(name="message", description="Export one message as JSON")
 async def export_message(interaction: discord.Interaction, channel: discord.TextChannel, message_id: str) -> None:
+    if await enforce_clinx_access(interaction, "export message") is None:
+        return
     try:
         message = await channel.fetch_message(int(message_id))
     except Exception:
@@ -2242,6 +3168,8 @@ async def export_message(interaction: discord.Interaction, channel: discord.Text
 @export_group.command(name="reactions", description="Export message reactions as JSON or CSV")
 @app_commands.choices(fmt=[app_commands.Choice(name="json", value="json"), app_commands.Choice(name="csv", value="csv")])
 async def export_reactions(interaction: discord.Interaction, channel: discord.TextChannel, message_id: str, fmt: app_commands.Choice[str]) -> None:
+    if await enforce_clinx_access(interaction, "export reactions") is None:
+        return
     try:
         message = await channel.fetch_message(int(message_id))
     except Exception:
@@ -2261,7 +3189,13 @@ async def export_reactions(interaction: discord.Interaction, channel: discord.Te
     await send_text_file(interaction, output.getvalue(), f"reactions_{message.id}.csv")
 
 
-async def run_import_job(guild: discord.Guild, snapshot: dict[str, Any]) -> None:
+async def run_import_job(
+    guild: discord.Guild,
+    snapshot: dict[str, Any],
+    *,
+    status_message: discord.Message | None = None,
+    pending: PendingApproval | None = None,
+) -> None:
     try:
         await apply_snapshot_to_guild(
             snapshot,
@@ -2275,19 +3209,61 @@ async def run_import_job(guild: discord.Guild, snapshot: dict[str, Any]) -> None
         )
         IMPORT_JOBS[guild.id]["status"] = "completed"
         IMPORT_JOBS[guild.id]["finished_at"] = utc_now_iso()
+        if status_message is not None and pending is not None:
+            await update_approval_message(
+                status_message,
+                pending,
+                title="Approved Import Complete",
+                preview_title="Import Result",
+                preview_body="The approved snapshot import completed successfully.",
+                color=EMBED_OK,
+                clear_content=True,
+                view=None,
+            )
     except asyncio.CancelledError:
         IMPORT_JOBS[guild.id]["status"] = "cancelled"
         IMPORT_JOBS[guild.id]["finished_at"] = utc_now_iso()
+        if status_message is not None and pending is not None:
+            try:
+                await update_approval_message(
+                    status_message,
+                    pending,
+                    title="Approved Import Cancelled",
+                    preview_title="Import Result",
+                    preview_body="The running import was cancelled before completion.",
+                    color=EMBED_WARN,
+                    clear_content=True,
+                    view=None,
+                )
+            except discord.HTTPException:
+                pass
         raise
     except Exception as exc:
         IMPORT_JOBS[guild.id]["status"] = "failed"
         IMPORT_JOBS[guild.id]["error"] = str(exc)
         IMPORT_JOBS[guild.id]["finished_at"] = utc_now_iso()
+        if status_message is not None and pending is not None:
+            try:
+                await update_approval_message(
+                    status_message,
+                    pending,
+                    title="Approved Import Failed",
+                    preview_title="Failure Details",
+                    preview_body=f"`{exc}`",
+                    color=EMBED_ERR,
+                    clear_content=True,
+                    view=None,
+                )
+            except discord.HTTPException:
+                pass
 
 
 @import_group.command(name="guild", description="Import a guild snapshot JSON file")
 @app_commands.default_permissions(administrator=True)
 async def import_guild(interaction: discord.Interaction, file: discord.Attachment) -> None:
+    decision = await enforce_clinx_access(interaction, "import guild")
+    if decision is None:
+        return
     if interaction.guild is None:
         await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
         return
@@ -2305,6 +3281,63 @@ async def import_guild(interaction: discord.Interaction, file: discord.Attachmen
         await interaction.followup.send(embed=make_embed("Busy", "An import is already running.", EMBED_WARN), ephemeral=True)
         return
 
+    if decision.requires_owner_approval:
+        plan = build_backup_plan_preview(snapshot, interaction.guild, {"load_roles", "load_channels", "load_settings"})
+        pending_ref: dict[str, PendingApproval] = {}
+
+        async def execute_import(message: discord.Message) -> None:
+            pending = pending_ref["value"]
+            await update_approval_message(
+                message,
+                pending,
+                title="Approved Import Started",
+                preview_title="Execution State",
+                preview_body="The approved guild snapshot import is running now.",
+                color=BACKUP_PLANNER_ACCENT,
+                clear_content=True,
+                view=None,
+            )
+            task = asyncio.create_task(
+                run_import_job(
+                    interaction.guild,
+                    snapshot,
+                    status_message=message,
+                    pending=pending,
+                )
+            )
+            IMPORT_JOBS[interaction.guild.id] = {
+                "status": "running",
+                "started_at": utc_now_iso(),
+                "task": task,
+            }
+
+        queued = await queue_owner_approval(
+            interaction,
+            command_name="import guild",
+            tier=decision.tier,
+            risk_label="Non-Destructive",
+            summary_text=format_approval_summary(
+                requester_id=interaction.user.id,
+                command_name="import guild",
+                target_name=interaction.guild.name,
+                route_text="`uploaded snapshot` -> current server",
+                scope_title="Request Scope",
+                scope_text="Import roles, channels, and settings from the uploaded guild snapshot without deleting live objects first.",
+                risk_label="Non-Destructive",
+            ),
+            preview_title="Planned Changes",
+            preview_body=render_backup_plan_lines(plan),
+            execute=execute_import,
+        )
+        if queued is None:
+            return
+        pending_ref["value"] = queued
+        await interaction.followup.send(
+            embed=make_embed("Approval Requested", "The server owner must approve this snapshot import before CLINX will start it.", EMBED_INFO),
+            ephemeral=True,
+        )
+        return
+
     task = asyncio.create_task(run_import_job(interaction.guild, snapshot))
     IMPORT_JOBS[interaction.guild.id] = {"status": "running", "started_at": utc_now_iso(), "task": task}
     await interaction.followup.send(embed=make_embed("Import Started", "Use `/import status` to track progress.", EMBED_INFO), ephemeral=True)
@@ -2313,6 +3346,8 @@ async def import_guild(interaction: discord.Interaction, file: discord.Attachmen
 @import_group.command(name="status", description="Get current import status")
 @app_commands.default_permissions(administrator=True)
 async def import_status(interaction: discord.Interaction) -> None:
+    if await enforce_clinx_access(interaction, "import status") is None:
+        return
     guild = interaction.guild
     if guild is None:
         await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
@@ -2334,6 +3369,8 @@ async def import_status(interaction: discord.Interaction) -> None:
 @import_group.command(name="cancel", description="Cancel running import")
 @app_commands.default_permissions(administrator=True)
 async def import_cancel(interaction: discord.Interaction) -> None:
+    if await enforce_clinx_access(interaction, "import cancel") is None:
+        return
     guild = interaction.guild
     if guild is None:
         await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
@@ -2350,6 +3387,71 @@ async def import_cancel(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=make_embed("Import", "Cancel requested.", EMBED_WARN), ephemeral=True)
 
 
+@safety_group.command(name="grant", description="Owner-only: grant CLINX trusted admin access")
+@app_commands.default_permissions(administrator=True)
+async def safety_grant(interaction: discord.Interaction, user: discord.Member) -> None:
+    if await enforce_clinx_access(interaction, "safety grant") is None:
+        return
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
+        return
+    if user.bot:
+        await interaction.response.send_message(embed=make_embed("Safety", "Bots cannot be added as trusted admins.", EMBED_WARN), ephemeral=True)
+        return
+    if user.id == guild.owner_id:
+        await interaction.response.send_message(embed=make_embed("Safety", "The server owner is always trusted.", EMBED_INFO), ephemeral=True)
+        return
+
+    add_trusted_admin(guild.id, user.id)
+    await interaction.response.send_message(
+        embed=make_embed("Trusted Admin Added", f"{user.mention} can now run Tier 2 and Tier 3 CLINX actions without owner approval.", EMBED_OK),
+        ephemeral=True,
+    )
+
+
+@safety_group.command(name="revoke", description="Owner-only: revoke CLINX trusted admin access")
+@app_commands.default_permissions(administrator=True)
+async def safety_revoke(interaction: discord.Interaction, user: discord.Member) -> None:
+    if await enforce_clinx_access(interaction, "safety revoke") is None:
+        return
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
+        return
+    if user.id == guild.owner_id:
+        await interaction.response.send_message(embed=make_embed("Safety", "The server owner cannot be removed from CLINX trust.", EMBED_INFO), ephemeral=True)
+        return
+
+    remove_trusted_admin(guild.id, user.id)
+    await interaction.response.send_message(
+        embed=make_embed("Trusted Admin Removed", f"{user.mention} now requires owner approval for Tier 2 and Tier 3 CLINX actions.", EMBED_OK),
+        ephemeral=True,
+    )
+
+
+@safety_group.command(name="list", description="Owner-only: list CLINX trusted admins")
+@app_commands.default_permissions(administrator=True)
+async def safety_list(interaction: discord.Interaction) -> None:
+    if await enforce_clinx_access(interaction, "safety list") is None:
+        return
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
+        return
+
+    trusted_ids = sorted(get_trusted_admin_ids(guild.id))
+    if not trusted_ids:
+        await interaction.response.send_message(embed=make_embed("Trusted Admins", "No trusted admins are configured for this guild.", EMBED_INFO), ephemeral=True)
+        return
+
+    lines: list[str] = []
+    for trusted_id in trusted_ids:
+        member = guild.get_member(trusted_id)
+        lines.append(member.mention if member else f"`{trusted_id}`")
+    await interaction.response.send_message(embed=make_embed("Trusted Admins", "\n".join(lines), EMBED_INFO), ephemeral=True)
+
+
 @bot.tree.command(name="help", description="Get command help")
 async def help_cmd(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(view=CommandLibraryView())
@@ -2364,6 +3466,8 @@ async def invite(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="leave", description="Make bot leave this server")
 @app_commands.default_permissions(administrator=True)
 async def leave(interaction: discord.Interaction) -> None:
+    if await enforce_clinx_access(interaction, "leave") is None:
+        return
     guild = interaction.guild
     if guild is None:
         await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
