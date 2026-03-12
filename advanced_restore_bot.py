@@ -1336,15 +1336,15 @@ async def apply_snapshot_to_guild(
         "updated_settings": 0,
     }
 
+    async def run_write(factory: Callable[[], Awaitable[T]]) -> T:
+        return await factory()
+
     if delete_channels and not create_only_missing:
         live_channels = [channel for channel in target.channels if not isinstance(channel, discord.CategoryChannel)]
         live_categories = list(target.categories)
         for channel in [*live_channels, *reversed(live_categories)]:
             try:
-                await throttled_discord_call(
-                    lambda channel=channel: channel.delete(reason="CLINX backup load: delete channels"),
-                    delay_override=BULK_DELETE_DELAY_SECONDS,
-                )
+                await run_write(lambda channel=channel: channel.delete(reason="CLINX backup load: delete channels"))
                 result["deleted_channels"] += 1
             except (discord.Forbidden, discord.HTTPException):
                 pass
@@ -1354,10 +1354,7 @@ async def apply_snapshot_to_guild(
             if role.managed or role.is_default():
                 continue
             try:
-                await throttled_discord_call(
-                    lambda role=role: role.delete(reason="CLINX backup load: delete roles"),
-                    delay_override=BULK_DELETE_DELAY_SECONDS,
-                )
+                await run_write(lambda role=role: role.delete(reason="CLINX backup load: delete roles"))
                 result["deleted_roles"] += 1
             except (discord.Forbidden, discord.HTTPException):
                 pass
@@ -1371,7 +1368,7 @@ async def apply_snapshot_to_guild(
 
             if role is None:
                 try:
-                    created_role = await throttled_discord_call(
+                    created_role = await run_write(
                         lambda role_data=role_data, permissions=permissions, color=color: target.create_role(
                             name=role_data["name"],
                             permissions=permissions,
@@ -1379,29 +1376,27 @@ async def apply_snapshot_to_guild(
                             hoist=role_data.get("hoist", False),
                             mentionable=role_data.get("mentionable", False),
                             reason="CLINX backup load: create role",
-                        ),
-                        delay_override=BULK_CREATE_DELAY_SECONDS,
+                        )
                     )
                     existing_roles[role_data["name"]] = created_role
                     result["created_roles"] += 1
-                except discord.Forbidden:
+                except (discord.Forbidden, discord.HTTPException):
                     pass
             else:
                 if role_matches_snapshot(role, role_data):
                     continue
                 try:
-                    await throttled_discord_call(
+                    await run_write(
                         lambda role=role, permissions=permissions, color=color, role_data=role_data: role.edit(
                             permissions=permissions,
                             colour=color,
                             hoist=role_data.get("hoist", False),
                             mentionable=role_data.get("mentionable", False),
                             reason="CLINX backup load: update role",
-                        ),
-                        delay_override=BULK_EDIT_DELAY_SECONDS,
+                        )
                     )
                     result["updated_roles"] += 1
-                except discord.Forbidden:
+                except (discord.Forbidden, discord.HTTPException):
                     pass
 
     if load_channels:
@@ -1414,30 +1409,28 @@ async def apply_snapshot_to_guild(
 
             if existing is None:
                 try:
-                    existing = await throttled_discord_call(
+                    existing = await run_write(
                         lambda cat_data=cat_data, overwrites=overwrites: target.create_category(
                             name=cat_data["name"],
                             overwrites=overwrites,
-                        ),
-                        delay_override=BULK_CREATE_DELAY_SECONDS,
+                        )
                     )
                     existing_categories[cat_data["name"]] = existing
                     result["created_categories"] += 1
-                except discord.Forbidden:
+                except (discord.Forbidden, discord.HTTPException):
                     continue
             elif not create_only_missing:
                 if category_matches_snapshot(existing, cat_data, overwrites):
                     category_map[cat_data["name"]] = existing
                     continue
                 try:
-                    await throttled_discord_call(
+                    await run_write(
                         lambda existing=existing, overwrites=overwrites, cat_data=cat_data: existing.edit(
                             overwrites=overwrites,
                             position=cat_data.get("position", existing.position),
-                        ),
-                        delay_override=BULK_EDIT_DELAY_SECONDS,
+                        )
                     )
-                except discord.Forbidden:
+                except (discord.Forbidden, discord.HTTPException):
                     pass
 
             category_map[cat_data["name"]] = existing
@@ -1451,7 +1444,7 @@ async def apply_snapshot_to_guild(
             if existing is None:
                 try:
                     if ch_data["type"] == "text":
-                        created_channel = await throttled_discord_call(
+                        created_channel = await run_write(
                             lambda ch_data=ch_data, category=category, overwrites=overwrites: target.create_text_channel(
                                 name=ch_data["name"],
                                 category=category,
@@ -1459,26 +1452,24 @@ async def apply_snapshot_to_guild(
                                 slowmode_delay=ch_data.get("slowmode_delay", 0),
                                 nsfw=ch_data.get("nsfw", False),
                                 overwrites=overwrites,
-                            ),
-                            delay_override=BULK_CREATE_DELAY_SECONDS,
+                            )
                         )
                     elif ch_data["type"] == "voice":
-                        created_channel = await throttled_discord_call(
+                        created_channel = await run_write(
                             lambda ch_data=ch_data, category=category, overwrites=overwrites: target.create_voice_channel(
                                 name=ch_data["name"],
                                 category=category,
                                 bitrate=ch_data.get("bitrate"),
                                 user_limit=ch_data.get("user_limit", 0),
                                 overwrites=overwrites,
-                            ),
-                            delay_override=BULK_CREATE_DELAY_SECONDS,
+                            )
                         )
                     else:
                         created_channel = None
                     if created_channel is not None:
                         existing_channels[ch_data["name"]] = created_channel
                     result["created_channels"] += 1
-                except discord.Forbidden:
+                except (discord.Forbidden, discord.HTTPException):
                     pass
                 continue
 
@@ -1489,31 +1480,29 @@ async def apply_snapshot_to_guild(
                 if isinstance(existing, discord.TextChannel) and ch_data["type"] == "text":
                     if text_channel_matches_snapshot(existing, ch_data, category, overwrites):
                         continue
-                    await throttled_discord_call(
+                    await run_write(
                         lambda existing=existing, category=category, ch_data=ch_data, overwrites=overwrites: existing.edit(
                             category=category,
                             topic=ch_data.get("topic"),
                             slowmode_delay=ch_data.get("slowmode_delay", 0),
                             nsfw=ch_data.get("nsfw", False),
                             overwrites=overwrites,
-                        ),
-                        delay_override=BULK_EDIT_DELAY_SECONDS,
+                        )
                     )
                     result["updated_channels"] += 1
                 elif isinstance(existing, discord.VoiceChannel) and ch_data["type"] == "voice":
                     if voice_channel_matches_snapshot(existing, ch_data, category, overwrites):
                         continue
-                    await throttled_discord_call(
+                    await run_write(
                         lambda existing=existing, category=category, ch_data=ch_data, overwrites=overwrites: existing.edit(
                             category=category,
                             bitrate=ch_data.get("bitrate", existing.bitrate),
                             user_limit=ch_data.get("user_limit", 0),
                             overwrites=overwrites,
-                        ),
-                        delay_override=BULK_EDIT_DELAY_SECONDS,
+                        )
                     )
                     result["updated_channels"] += 1
-            except discord.Forbidden:
+            except (discord.Forbidden, discord.HTTPException):
                 pass
 
     if load_settings and not create_only_missing:
@@ -1550,12 +1539,9 @@ async def apply_snapshot_to_guild(
         settings_applied = False
         if not guild_settings_match(target, edit_kwargs):
             try:
-                await throttled_discord_call(
-                    lambda edit_kwargs=edit_kwargs: target.edit(**edit_kwargs),
-                    delay_override=BULK_EDIT_DELAY_SECONDS,
-                )
+                await run_write(lambda edit_kwargs=edit_kwargs: target.edit(**edit_kwargs))
                 settings_applied = True
-            except discord.Forbidden:
+            except (discord.Forbidden, discord.HTTPException):
                 pass
 
         icon_bytes = decode_snapshot_asset(settings.get("icon_image"))
@@ -1574,12 +1560,11 @@ async def apply_snapshot_to_guild(
             if asset_bytes is None and getattr(target, asset_key) is None:
                 continue
             try:
-                await throttled_discord_call(
+                await run_write(
                     lambda asset_key=asset_key, asset_bytes=asset_bytes: target.edit(
                         **{asset_key: asset_bytes},
                         reason=f"CLINX backup load: update {asset_key.replace('_', ' ')}",
-                    ),
-                    delay_override=BULK_EDIT_DELAY_SECONDS,
+                    )
                 )
                 settings_applied = True
             except (discord.Forbidden, discord.HTTPException):
