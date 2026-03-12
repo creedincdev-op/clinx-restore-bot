@@ -789,6 +789,7 @@ BACKUP_DELETE_DEPENDENCIES = {
     "delete_roles": "load_roles",
     "delete_channels": "load_channels",
 }
+BACKUP_DELETE_REQUIRED_LANES = frozenset({"load_roles", "load_channels"})
 COMMAND_LIBRARY: dict[str, list[LibraryCommand]] = {
     "Backup": [
         LibraryCommand("backup create", "Create a fresh server backup and return its load ID.", "Snapshots the selected source guild, stores it in the CLINX backup DB, and tags the creator in the backup record."),
@@ -1121,10 +1122,18 @@ def serialize_channel_ref(channel: discord.abc.GuildChannel | None) -> str | Non
 
 
 async def serialize_settings(guild: discord.Guild, *, include_assets: bool = True) -> dict[str, Any]:
-    icon_image = await serialize_asset(guild.icon) if include_assets else None
-    banner_image = await serialize_asset(guild.banner) if include_assets else None
-    splash_image = await serialize_asset(guild.splash) if include_assets else None
-    discovery_splash_image = await serialize_asset(guild.discovery_splash) if include_assets else None
+    if include_assets:
+        icon_image, banner_image, splash_image, discovery_splash_image = await asyncio.gather(
+            serialize_asset(guild.icon),
+            serialize_asset(guild.banner),
+            serialize_asset(guild.splash),
+            serialize_asset(guild.discovery_splash),
+        )
+    else:
+        icon_image = None
+        banner_image = None
+        splash_image = None
+        discovery_splash_image = None
     return {
         "name": guild.name,
         "description": guild.description,
@@ -1147,6 +1156,7 @@ async def serialize_settings(guild: discord.Guild, *, include_assets: bool = Tru
 
 
 async def serialize_guild_snapshot(guild: discord.Guild, *, include_assets: bool = True) -> dict[str, Any]:
+    settings_task = asyncio.create_task(serialize_settings(guild, include_assets=include_assets))
     categories: list[dict[str, Any]] = []
     channels: list[dict[str, Any]] = []
 
@@ -1192,7 +1202,7 @@ async def serialize_guild_snapshot(guild: discord.Guild, *, include_assets: bool
         "source_guild_id": guild.id,
         "source_guild_name": guild.name,
         "roles": serialize_roles(guild),
-        "settings": await serialize_settings(guild, include_assets=include_assets),
+        "settings": await settings_task,
         "categories": categories,
         "channels": channels,
     }
@@ -1688,17 +1698,16 @@ def render_backup_plan_lines(plan: dict[str, int]) -> str:
 
 def normalize_backup_actions(selected_actions: set[str]) -> set[str]:
     normalized = set(selected_actions)
-    for delete_action, load_action in BACKUP_DELETE_DEPENDENCIES.items():
-        if load_action not in normalized:
-            normalized.discard(delete_action)
+    if not BACKUP_DELETE_REQUIRED_LANES.issubset(normalized):
+        normalized.discard("delete_roles")
+        normalized.discard("delete_channels")
     return normalized
 
 
 def is_backup_action_available(selected_actions: set[str], action_key: str) -> bool:
-    required = BACKUP_DELETE_DEPENDENCIES.get(action_key)
-    if required is None:
+    if action_key not in BACKUP_DELETE_DEPENDENCIES:
         return True
-    return required in selected_actions
+    return BACKUP_DELETE_REQUIRED_LANES.issubset(selected_actions)
 
 
 def render_backup_lane_lines(selected_actions: set[str]) -> str:
@@ -1718,21 +1727,21 @@ def render_backup_lane_lines(selected_actions: set[str]) -> str:
 
 def render_backup_guardrail_lines(selected_actions: set[str]) -> str:
     lines: list[str] = []
-    if "load_roles" not in selected_actions:
-        lines.append("• `Delete Roles` unlocks only after `Load Roles` is enabled.")
+    all_delete_lanes_unlocked = BACKUP_DELETE_REQUIRED_LANES.issubset(selected_actions)
+
+    if not all_delete_lanes_unlocked:
+        lines.append("• `Delete Roles` and `Delete Channels` unlock only when both `Load Roles` and `Load Channels` are enabled.")
     elif "delete_roles" in selected_actions:
         lines.append("• Roles will be wiped first, then rebuilt from the backup snapshot.")
 
-    if "load_channels" not in selected_actions:
-        lines.append("• `Delete Channels` unlocks only after `Load Channels` is enabled.")
-    elif "delete_channels" in selected_actions:
+    if all_delete_lanes_unlocked and "delete_channels" in selected_actions:
         lines.append("• Channels will be wiped first, then the backup layout will be rebuilt.")
 
     if not lines:
-        if all(load_action in selected_actions for load_action in BACKUP_DELETE_DEPENDENCIES.values()):
-            lines.append("• Matching rebuild lanes are armed. Optional wipe lanes are now available if you want a full replace instead of a merge.")
+        if all_delete_lanes_unlocked:
+            lines.append("• Full rebuild lanes are armed. You can enable the wipe lanes if you want a full replace instead of a merge.")
         else:
-            lines.append("• Destructive wipes stay locked until a matching rebuild lane is armed.")
+            lines.append("• Destructive wipes stay locked until the full role and channel rebuild stack is armed.")
     return "\n".join(lines)
 
 
@@ -1956,7 +1965,7 @@ class BackupLoadActionButton(discord.ui.Button["BackupLoadPlannerView"]):
         if is_selected and is_destructive:
             style = discord.ButtonStyle.danger
         elif is_selected:
-            style = discord.ButtonStyle.primary
+            style = discord.ButtonStyle.success
 
         super().__init__(label=BACKUP_ACTION_LABELS[action_key], style=style, disabled=not is_available)
         self.backup_id = backup_id
@@ -2586,8 +2595,10 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
         await interaction.followup.send(embed=make_embed("Error", "Source guild not found.", EMBED_ERR), ephemeral=True)
         return
 
-    store = load_backup_store()
     backup_id = f"BKP-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{secrets.token_hex(3).upper()}"
+    store_task = asyncio.create_task(asyncio.to_thread(load_backup_store))
+    snapshot = await serialize_guild_snapshot(source)
+    store = await store_task
     store["backups"][backup_id] = {
         "id": backup_id,
         "created_at": utc_now_iso(),
@@ -2595,7 +2606,7 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
         "created_by_display_name": str(interaction.user),
         "source_guild_id": source.id,
         "source_guild_name": source.name,
-        "snapshot": await serialize_guild_snapshot(source),
+        "snapshot": snapshot,
     }
     register_backup_owner(
         store,
@@ -2603,7 +2614,7 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
         user_id=interaction.user.id,
         display_name=str(interaction.user),
     )
-    save_backup_store(store)
+    await asyncio.to_thread(save_backup_store, store)
 
     await interaction.followup.send(
         embed=make_embed(
