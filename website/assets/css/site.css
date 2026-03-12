@@ -1229,8 +1229,11 @@
 
     .footer-copy {
       margin: 0;
-      font-weight: 700;
-      color: #dceafe;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: .79rem;
+      font-weight: 500;
+      letter-spacing: .03em;
+      color: #a9c0db;
     }
 
     .mono {
