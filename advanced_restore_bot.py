@@ -1551,7 +1551,7 @@ async def backuplist_alias(interaction: discord.Interaction) -> None:
 @app_commands.describe(source_guild_id="Source guild ID", target_guild_id="Target guild ID")
 @app_commands.default_permissions(administrator=True)
 async def restore_missing(interaction: discord.Interaction, source_guild_id: int | None = None, target_guild_id: int | None = None) -> None:
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    await interaction.response.defer(thinking=True)
 
     resolved_source = source_guild_id or resolve_default_backup_guild_id()
     source = bot.get_guild(resolved_source) if resolved_source else None
@@ -1579,14 +1579,13 @@ async def restore_missing(interaction: discord.Interaction, source_guild_id: int
             f"Created categories: `{stats['created_categories']}`\nCreated channels: `{stats['created_channels']}`",
             EMBED_OK,
         ),
-        ephemeral=True,
     )
 
 
 @bot.tree.command(name="cleantoday", description="Delete channels created today (UTC)")
 @app_commands.default_permissions(administrator=True)
 async def cleantoday(interaction: discord.Interaction, confirm: bool = False) -> None:
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    await interaction.response.defer(thinking=True)
 
     guild = interaction.guild
     if guild is None:
@@ -1597,13 +1596,12 @@ async def cleantoday(interaction: discord.Interaction, confirm: bool = False) ->
     targets = [ch for ch in guild.channels if getattr(ch, "created_at", None) and ch.created_at.date() == today]
 
     if not targets:
-        await interaction.followup.send(embed=make_embed("Clean Today", "No channels created today (UTC).", EMBED_INFO), ephemeral=True)
+        await interaction.followup.send(embed=make_embed("Clean Today", "No channels created today (UTC).", EMBED_INFO))
         return
 
     if not confirm:
         await interaction.followup.send(
             embed=make_embed("Warning", f"Dry run: `{len(targets)}` channels would be deleted. Run again with `confirm=true`.", EMBED_WARN),
-            ephemeral=True,
         )
         return
 
@@ -1617,7 +1615,7 @@ async def cleantoday(interaction: discord.Interaction, confirm: bool = False) ->
         except discord.Forbidden:
             pass
 
-    await interaction.followup.send(embed=make_embed("Clean Today Complete", f"Deleted `{deleted}` channels.", EMBED_OK), ephemeral=True)
+    await interaction.followup.send(embed=make_embed("Clean Today Complete", f"Deleted `{deleted}` channels.", EMBED_OK))
 
 
 class MassChannelsModal(discord.ui.Modal, title="Mass Channel Creator"):
@@ -1645,7 +1643,7 @@ class MassChannelsModal(discord.ui.Modal, title="Mass Channel Creator"):
             await interaction.response.send_message(embed=make_embed("Error", "Run this command in a server.", EMBED_ERR), ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(thinking=True)
         layout = self.layout_input.value
         if self.extra_layout_input.value:
             layout = f"{layout}\n{self.extra_layout_input.value}"
@@ -1665,7 +1663,7 @@ class MassChannelsModal(discord.ui.Modal, title="Mass Channel Creator"):
             f"Created channels: `{stats['created_channels']}`\n"
             f"Skipped existing/duplicates: `{stats['skipped_channels']}`"
         )
-        await interaction.followup.send(embed=make_embed("Mass Create Complete", summary, EMBED_OK), ephemeral=True)
+        await interaction.followup.send(embed=make_embed("Mass Create Complete", summary, EMBED_OK))
 
 
 @bot.tree.command(name="masschannels", description="Open the bulk channel creator modal")
@@ -2189,7 +2187,7 @@ async def help_cmd(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="invite", description="Get bot invite link")
 async def invite(interaction: discord.Interaction) -> None:
     link = build_invite_link()
-    await interaction.response.send_message(embed=make_embed("Invite CLINX", link, EMBED_INFO), ephemeral=True)
+    await interaction.response.send_message(embed=make_embed("Invite CLINX", link, EMBED_INFO))
 
 
 @bot.tree.command(name="leave", description="Make bot leave this server")
