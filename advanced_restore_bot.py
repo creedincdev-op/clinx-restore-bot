@@ -2693,12 +2693,16 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 async def backup_create(interaction: discord.Interaction, source_guild_id: int | None = None) -> None:
     if await enforce_clinx_access(interaction, "backup create") is None:
         return
-    await interaction.response.defer(ephemeral=True, thinking=True)
 
     source = interaction.guild if source_guild_id is None else bot.get_guild(source_guild_id)
     if source is None:
-        await interaction.followup.send(embed=make_embed("Error", "Source guild not found.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Error", "Source guild not found.", EMBED_ERR), ephemeral=True)
         return
+
+    await interaction.response.send_message(
+        embed=make_embed("Creating Backup", "CLINX is building a fresh snapshot now.", EMBED_INFO),
+        ephemeral=True,
+    )
 
     backup_id = f"BKP-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{secrets.token_hex(3).upper()}"
     store_task = asyncio.create_task(asyncio.to_thread(load_backup_store))
@@ -2721,13 +2725,12 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
     )
     await asyncio.to_thread(save_backup_store, store)
 
-    await interaction.followup.send(
+    await interaction.edit_original_response(
         embed=make_embed(
             "Backup Created",
             f"Load ID: `{backup_id}`\nSource: `{source.name}` ({source.id})",
             EMBED_OK,
         ),
-        ephemeral=True,
     )
 
 
@@ -2736,15 +2739,14 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
 async def backup_load(interaction: discord.Interaction, load_id: str, target_guild_id: int | None = None) -> None:
     if await enforce_clinx_access(interaction, "backup load planner") is None:
         return
-    await interaction.response.defer(ephemeral=True, thinking=True)
 
     store = load_backup_store()
     record = store.get("backups", {}).get(load_id)
     if record is None:
-        await interaction.followup.send(embed=make_embed("Invalid Load ID", "No backup found with that ID.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Invalid Load ID", "No backup found with that ID.", EMBED_ERR), ephemeral=True)
         return
     if record.get("created_by_user_id") != interaction.user.id and not is_developer_user(interaction.user.id):
-        await interaction.followup.send(
+        await interaction.response.send_message(
             embed=make_embed("Access Denied", "You can only load backups created by your account.", EMBED_ERR),
             ephemeral=True,
         )
@@ -2752,7 +2754,7 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
 
     target = interaction.guild if target_guild_id is None else bot.get_guild(target_guild_id)
     if target is None:
-        await interaction.followup.send(embed=make_embed("Error", "Target guild not found.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Error", "Target guild not found.", EMBED_ERR), ephemeral=True)
         return
 
     view = BackupLoadPlannerView(
@@ -2762,7 +2764,7 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
         snapshot=record["snapshot"],
         target=target,
     )
-    await interaction.followup.send(view=view, ephemeral=True)
+    await interaction.response.send_message(view=view, ephemeral=True)
 
 
 @backup_group.command(name="list", description="List saved backup IDs")
@@ -2868,15 +2870,18 @@ async def restore_missing(interaction: discord.Interaction, source_guild_id: int
     decision = await enforce_clinx_access(interaction, "restore_missing")
     if decision is None:
         return
-    await interaction.response.defer(thinking=True)
 
     resolved_source = source_guild_id or resolve_default_backup_guild_id()
     source = bot.get_guild(resolved_source) if resolved_source else None
     target = interaction.guild if target_guild_id is None else bot.get_guild(target_guild_id)
 
     if source is None or target is None:
-        await interaction.followup.send(embed=make_embed("Error", "Could not resolve source or target guild.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Error", "Could not resolve source or target guild.", EMBED_ERR), ephemeral=True)
         return
+
+    await interaction.response.send_message(
+        embed=make_embed("Restore Missing", "CLINX is comparing the source snapshot with this server now.", EMBED_INFO),
+    )
 
     snapshot = await serialize_guild_snapshot(source, include_assets=False)
     preview = build_restore_missing_preview(snapshot, target)
@@ -2947,11 +2952,13 @@ async def restore_missing(interaction: discord.Interaction, source_guild_id: int
             execute=execute_restore_missing,
         )
         if queued is None:
+            await interaction.edit_original_response(
+                embed=make_embed("Approval Request Failed", "CLINX could not queue the owner approval request.", EMBED_ERR)
+            )
             return
         pending_ref["value"] = queued
-        await interaction.followup.send(
+        await interaction.edit_original_response(
             embed=make_embed("Approval Requested", "The server owner must approve this restore request before CLINX will run it.", EMBED_INFO),
-            ephemeral=True,
         )
         return
 
@@ -2966,7 +2973,7 @@ async def restore_missing(interaction: discord.Interaction, source_guild_id: int
         create_only_missing=True,
     )
 
-    await interaction.followup.send(
+    await interaction.edit_original_response(
         embed=make_embed(
             "Restore Missing Complete",
             f"Created categories: `{stats['created_categories']}`\nCreated channels: `{stats['created_channels']}`",
@@ -2980,22 +2987,25 @@ async def cleantoday(interaction: discord.Interaction, confirm: bool = False) ->
     decision = await enforce_clinx_access(interaction, "cleantoday")
     if decision is None:
         return
-    await interaction.response.defer(thinking=True)
 
     guild = interaction.guild
     if guild is None:
-        await interaction.followup.send(embed=make_embed("Error", "Run this command in a server.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Error", "Run this command in a server.", EMBED_ERR), ephemeral=True)
         return
+
+    await interaction.response.send_message(
+        embed=make_embed("Clean Today", "CLINX is scanning channels created today (UTC).", EMBED_INFO),
+    )
 
     today = datetime.now(timezone.utc).date()
     targets = [ch for ch in guild.channels if getattr(ch, "created_at", None) and ch.created_at.date() == today]
 
     if not targets:
-        await interaction.followup.send(embed=make_embed("Clean Today", "No channels created today (UTC).", EMBED_INFO))
+        await interaction.edit_original_response(embed=make_embed("Clean Today", "No channels created today (UTC).", EMBED_INFO))
         return
 
     if not confirm:
-        await interaction.followup.send(
+        await interaction.edit_original_response(
             embed=make_embed("Warning", f"Dry run: `{len(targets)}` channels would be deleted. Run again with `confirm=true`.", EMBED_WARN),
         )
         return
@@ -3057,11 +3067,13 @@ async def cleantoday(interaction: discord.Interaction, confirm: bool = False) ->
             execute=execute_clean_today,
         )
         if queued is None:
+            await interaction.edit_original_response(
+                embed=make_embed("Approval Request Failed", "CLINX could not queue the owner approval request.", EMBED_ERR)
+            )
             return
         pending_ref["value"] = queued
-        await interaction.followup.send(
+        await interaction.edit_original_response(
             embed=make_embed("Approval Requested", "The server owner must approve this cleanup request before CLINX will delete anything.", EMBED_INFO),
-            ephemeral=True,
         )
         return
 
@@ -3076,7 +3088,7 @@ async def cleantoday(interaction: discord.Interaction, confirm: bool = False) ->
         except (discord.Forbidden, discord.HTTPException):
             pass
 
-    await interaction.followup.send(embed=make_embed("Clean Today Complete", f"Deleted `{deleted}` channels.", EMBED_OK))
+    await interaction.edit_original_response(embed=make_embed("Clean Today Complete", f"Deleted `{deleted}` channels.", EMBED_OK))
 
 
 class MassChannelsModal(discord.ui.Modal, title="Mass Channel Creator"):
@@ -3107,7 +3119,10 @@ class MassChannelsModal(discord.ui.Modal, title="Mass Channel Creator"):
             await interaction.response.send_message(embed=make_embed("Error", "Run this command in a server.", EMBED_ERR), ephemeral=True)
             return
 
-        await interaction.response.defer(thinking=True)
+        await interaction.response.send_message(
+            embed=make_embed("Mass Channels", "CLINX is parsing the layout and building a preview now.", EMBED_INFO),
+            ephemeral=True,
+        )
         layout = self.layout_input.value
         if self.extra_layout_input.value:
             layout = f"{layout}\n{self.extra_layout_input.value}"
@@ -3119,7 +3134,7 @@ class MassChannelsModal(discord.ui.Modal, title="Mass Channel Creator"):
                 create_categories=self.create_categories,
             )
         except ValueError as exc:
-            await interaction.followup.send(embed=make_embed("Mass Channels", str(exc), EMBED_ERR), ephemeral=True)
+            await interaction.edit_original_response(embed=make_embed("Mass Channels", str(exc), EMBED_ERR))
             return
 
         if decision.requires_owner_approval:
@@ -3182,11 +3197,13 @@ class MassChannelsModal(discord.ui.Modal, title="Mass Channel Creator"):
                 execute=execute_mass_channels,
             )
             if queued is None:
+                await interaction.edit_original_response(
+                    embed=make_embed("Approval Request Failed", "CLINX could not queue the owner approval request.", EMBED_ERR)
+                )
                 return
             pending_ref["value"] = queued
-            await interaction.followup.send(
+            await interaction.edit_original_response(
                 embed=make_embed("Approval Requested", "The server owner must approve this mass channel request before CLINX will create anything.", EMBED_INFO),
-                ephemeral=True,
             )
             return
 
@@ -3202,6 +3219,9 @@ class MassChannelsModal(discord.ui.Modal, title="Mass Channel Creator"):
             f"Skipped existing/duplicates: `{stats['skipped_channels']}`"
         )
         await interaction.followup.send(embed=make_embed("Mass Create Complete", summary, EMBED_OK))
+        await interaction.edit_original_response(
+            embed=make_embed("Mass Channels", "Mass create complete. Result posted in this channel.", EMBED_OK)
+        )
 
 
 @bot.tree.command(name="masschannels", description="Open the bulk channel creator modal")
@@ -3723,17 +3743,20 @@ async def import_guild(interaction: discord.Interaction, file: discord.Attachmen
         await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    await interaction.response.send_message(
+        embed=make_embed("Import Snapshot", "CLINX is validating the uploaded snapshot file now.", EMBED_INFO),
+        ephemeral=True,
+    )
 
     try:
         payload = await file.read()
         snapshot = json.loads(payload.decode("utf-8"))
     except Exception:
-        await interaction.followup.send(embed=make_embed("Error", "Invalid JSON file.", EMBED_ERR), ephemeral=True)
+        await interaction.edit_original_response(embed=make_embed("Error", "Invalid JSON file.", EMBED_ERR))
         return
 
     if interaction.guild.id in IMPORT_JOBS and IMPORT_JOBS[interaction.guild.id].get("status") == "running":
-        await interaction.followup.send(embed=make_embed("Busy", "An import is already running.", EMBED_WARN), ephemeral=True)
+        await interaction.edit_original_response(embed=make_embed("Busy", "An import is already running.", EMBED_WARN))
         return
 
     if decision.requires_owner_approval:
@@ -3785,17 +3808,19 @@ async def import_guild(interaction: discord.Interaction, file: discord.Attachmen
             execute=execute_import,
         )
         if queued is None:
+            await interaction.edit_original_response(
+                embed=make_embed("Approval Request Failed", "CLINX could not queue the owner approval request.", EMBED_ERR)
+            )
             return
         pending_ref["value"] = queued
-        await interaction.followup.send(
+        await interaction.edit_original_response(
             embed=make_embed("Approval Requested", "The server owner must approve this snapshot import before CLINX will start it.", EMBED_INFO),
-            ephemeral=True,
         )
         return
 
     task = asyncio.create_task(run_import_job(interaction.guild, snapshot))
     IMPORT_JOBS[interaction.guild.id] = {"status": "running", "started_at": utc_now_iso(), "task": task}
-    await interaction.followup.send(embed=make_embed("Import Started", "Use `/import status` to track progress.", EMBED_INFO), ephemeral=True)
+    await interaction.edit_original_response(embed=make_embed("Import Started", "Use `/import status` to track progress.", EMBED_INFO))
 
 
 @import_group.command(name="status", description="Get current import status")
