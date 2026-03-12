@@ -40,6 +40,9 @@ IMPORT_JOBS: dict[int, dict[str, Any]] = {}
 PENDING_APPROVALS: dict[int, "PendingApproval"] = {}
 ACTION_DELAY_SECONDS = max(0.0, float(os.getenv("DISCORD_ACTION_DELAY_SECONDS", "0.35")))
 ACTION_RETRY_LIMIT = max(1, int(os.getenv("DISCORD_ACTION_RETRY_LIMIT", "5")))
+BULK_DELETE_DELAY_SECONDS = max(0.0, float(os.getenv("DISCORD_BULK_DELETE_DELAY_SECONDS", "0.08")))
+BULK_CREATE_DELAY_SECONDS = max(0.0, float(os.getenv("DISCORD_BULK_CREATE_DELAY_SECONDS", "0.08")))
+BULK_EDIT_DELAY_SECONDS = max(0.0, float(os.getenv("DISCORD_BULK_EDIT_DELAY_SECONDS", "0.12")))
 ACTION_GATE_LOCK: asyncio.Lock | None = None
 ACTION_LAST_DISPATCH_AT = 0.0
 APPROVAL_TIMEOUT_SECONDS = 120.0
@@ -1011,17 +1014,22 @@ def get_action_gate_lock() -> asyncio.Lock:
     return ACTION_GATE_LOCK
 
 
-async def throttled_discord_call(factory: Callable[[], Awaitable[T]]) -> T:
+async def throttled_discord_call(
+    factory: Callable[[], Awaitable[T]],
+    *,
+    delay_override: float | None = None,
+) -> T:
     global ACTION_LAST_DISPATCH_AT
     last_error: discord.HTTPException | None = None
+    delay_seconds = ACTION_DELAY_SECONDS if delay_override is None else max(0.0, delay_override)
 
     for _ in range(ACTION_RETRY_LIMIT):
         retry_after: float | None = None
         async with get_action_gate_lock():
-            if ACTION_DELAY_SECONDS > 0:
+            if delay_seconds > 0:
                 elapsed = time.monotonic() - ACTION_LAST_DISPATCH_AT
-                if elapsed < ACTION_DELAY_SECONDS:
-                    await asyncio.sleep(ACTION_DELAY_SECONDS - elapsed)
+                if elapsed < delay_seconds:
+                    await asyncio.sleep(delay_seconds - elapsed)
 
             try:
                 result = await factory()
@@ -1030,7 +1038,7 @@ async def throttled_discord_call(factory: Callable[[], Awaitable[T]]) -> T:
                 if exc.status != 429:
                     raise
                 last_error = exc
-                retry_after = extract_retry_after(exc, max(ACTION_DELAY_SECONDS, 0.75))
+                retry_after = extract_retry_after(exc, max(delay_seconds, 0.25))
             else:
                 ACTION_LAST_DISPATCH_AT = time.monotonic()
                 return result
@@ -1333,7 +1341,10 @@ async def apply_snapshot_to_guild(
         live_categories = list(target.categories)
         for channel in [*live_channels, *reversed(live_categories)]:
             try:
-                await throttled_discord_call(lambda channel=channel: channel.delete(reason="CLINX backup load: delete channels"))
+                await throttled_discord_call(
+                    lambda channel=channel: channel.delete(reason="CLINX backup load: delete channels"),
+                    delay_override=BULK_DELETE_DELAY_SECONDS,
+                )
                 result["deleted_channels"] += 1
             except (discord.Forbidden, discord.HTTPException):
                 pass
@@ -1343,7 +1354,10 @@ async def apply_snapshot_to_guild(
             if role.managed or role.is_default():
                 continue
             try:
-                await throttled_discord_call(lambda role=role: role.delete(reason="CLINX backup load: delete roles"))
+                await throttled_discord_call(
+                    lambda role=role: role.delete(reason="CLINX backup load: delete roles"),
+                    delay_override=BULK_DELETE_DELAY_SECONDS,
+                )
                 result["deleted_roles"] += 1
             except (discord.Forbidden, discord.HTTPException):
                 pass
@@ -1365,7 +1379,8 @@ async def apply_snapshot_to_guild(
                             hoist=role_data.get("hoist", False),
                             mentionable=role_data.get("mentionable", False),
                             reason="CLINX backup load: create role",
-                        )
+                        ),
+                        delay_override=BULK_CREATE_DELAY_SECONDS,
                     )
                     existing_roles[role_data["name"]] = created_role
                     result["created_roles"] += 1
@@ -1382,7 +1397,8 @@ async def apply_snapshot_to_guild(
                             hoist=role_data.get("hoist", False),
                             mentionable=role_data.get("mentionable", False),
                             reason="CLINX backup load: update role",
-                        )
+                        ),
+                        delay_override=BULK_EDIT_DELAY_SECONDS,
                     )
                     result["updated_roles"] += 1
                 except discord.Forbidden:
@@ -1402,7 +1418,8 @@ async def apply_snapshot_to_guild(
                         lambda cat_data=cat_data, overwrites=overwrites: target.create_category(
                             name=cat_data["name"],
                             overwrites=overwrites,
-                        )
+                        ),
+                        delay_override=BULK_CREATE_DELAY_SECONDS,
                     )
                     existing_categories[cat_data["name"]] = existing
                     result["created_categories"] += 1
@@ -1417,7 +1434,8 @@ async def apply_snapshot_to_guild(
                         lambda existing=existing, overwrites=overwrites, cat_data=cat_data: existing.edit(
                             overwrites=overwrites,
                             position=cat_data.get("position", existing.position),
-                        )
+                        ),
+                        delay_override=BULK_EDIT_DELAY_SECONDS,
                     )
                 except discord.Forbidden:
                     pass
@@ -1441,7 +1459,8 @@ async def apply_snapshot_to_guild(
                                 slowmode_delay=ch_data.get("slowmode_delay", 0),
                                 nsfw=ch_data.get("nsfw", False),
                                 overwrites=overwrites,
-                            )
+                            ),
+                            delay_override=BULK_CREATE_DELAY_SECONDS,
                         )
                     elif ch_data["type"] == "voice":
                         created_channel = await throttled_discord_call(
@@ -1451,7 +1470,8 @@ async def apply_snapshot_to_guild(
                                 bitrate=ch_data.get("bitrate"),
                                 user_limit=ch_data.get("user_limit", 0),
                                 overwrites=overwrites,
-                            )
+                            ),
+                            delay_override=BULK_CREATE_DELAY_SECONDS,
                         )
                     else:
                         created_channel = None
@@ -1476,7 +1496,8 @@ async def apply_snapshot_to_guild(
                             slowmode_delay=ch_data.get("slowmode_delay", 0),
                             nsfw=ch_data.get("nsfw", False),
                             overwrites=overwrites,
-                        )
+                        ),
+                        delay_override=BULK_EDIT_DELAY_SECONDS,
                     )
                     result["updated_channels"] += 1
                 elif isinstance(existing, discord.VoiceChannel) and ch_data["type"] == "voice":
@@ -1488,7 +1509,8 @@ async def apply_snapshot_to_guild(
                             bitrate=ch_data.get("bitrate", existing.bitrate),
                             user_limit=ch_data.get("user_limit", 0),
                             overwrites=overwrites,
-                        )
+                        ),
+                        delay_override=BULK_EDIT_DELAY_SECONDS,
                     )
                     result["updated_channels"] += 1
             except discord.Forbidden:
@@ -1528,7 +1550,10 @@ async def apply_snapshot_to_guild(
         settings_applied = False
         if not guild_settings_match(target, edit_kwargs):
             try:
-                await throttled_discord_call(lambda edit_kwargs=edit_kwargs: target.edit(**edit_kwargs))
+                await throttled_discord_call(
+                    lambda edit_kwargs=edit_kwargs: target.edit(**edit_kwargs),
+                    delay_override=BULK_EDIT_DELAY_SECONDS,
+                )
                 settings_applied = True
             except discord.Forbidden:
                 pass
@@ -1553,7 +1578,8 @@ async def apply_snapshot_to_guild(
                     lambda asset_key=asset_key, asset_bytes=asset_bytes: target.edit(
                         **{asset_key: asset_bytes},
                         reason=f"CLINX backup load: update {asset_key.replace('_', ' ')}",
-                    )
+                    ),
+                    delay_override=BULK_EDIT_DELAY_SECONDS,
                 )
                 settings_applied = True
             except (discord.Forbidden, discord.HTTPException):
@@ -1590,7 +1616,8 @@ async def create_mass_channels_from_layout(
             category = category_cache.get(item.category)
             if category is None and create_categories:
                 category = await throttled_discord_call(
-                    lambda item=item: guild.create_category(item.category)
+                    lambda item=item: guild.create_category(item.category),
+                    delay_override=BULK_CREATE_DELAY_SECONDS,
                 )
                 category_cache[item.category] = category
                 result["created_categories"] += 1
@@ -1613,7 +1640,8 @@ async def create_mass_channels_from_layout(
                 lambda item=item, category=category: guild.create_voice_channel(
                     name=item.name,
                     category=category,
-                )
+                ),
+                delay_override=BULK_CREATE_DELAY_SECONDS,
             )
         else:
             await throttled_discord_call(
@@ -1621,7 +1649,8 @@ async def create_mass_channels_from_layout(
                     name=item.name,
                     category=category,
                     topic=item.topic,
-                )
+                ),
+                delay_override=BULK_CREATE_DELAY_SECONDS,
             )
         result["created_channels"] += 1
 
@@ -2995,7 +3024,10 @@ async def cleantoday(interaction: discord.Interaction, confirm: bool = False) ->
             try:
                 for channel in targets:
                     try:
-                        await throttled_discord_call(lambda channel=channel: channel.delete(reason=f"/cleantoday by {interaction.user}"))
+                        await throttled_discord_call(
+                            lambda channel=channel: channel.delete(reason=f"/cleantoday by {interaction.user}"),
+                            delay_override=BULK_DELETE_DELAY_SECONDS,
+                        )
                         deleted += 1
                     except (discord.Forbidden, discord.HTTPException):
                         continue
@@ -3052,7 +3084,8 @@ async def cleantoday(interaction: discord.Interaction, confirm: bool = False) ->
     for ch in targets:
         try:
             await throttled_discord_call(
-                lambda ch=ch: ch.delete(reason=f"/cleantoday by {interaction.user}")
+                lambda ch=ch: ch.delete(reason=f"/cleantoday by {interaction.user}"),
+                delay_override=BULK_DELETE_DELAY_SECONDS,
             )
             deleted += 1
         except (discord.Forbidden, discord.HTTPException):
