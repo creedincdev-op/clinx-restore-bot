@@ -287,6 +287,7 @@ async def apply_snapshot_to_guild(
         "updated_channels": 0,
         "updated_settings": 0,
     }
+    precreated_categories: dict[str, discord.CategoryChannel] = {}
 
     if delete_channels and not create_only_missing:
         for channel in list(target.channels):
@@ -295,6 +296,15 @@ async def apply_snapshot_to_guild(
                 result["deleted_channels"] += 1
             except discord.Forbidden:
                 pass
+
+        if load_channels:
+            for cat_data in snapshot.get("categories", []):
+                try:
+                    created_category = await target.create_category(name=cat_data["name"])
+                    precreated_categories[cat_data["name"]] = created_category
+                    result["created_categories"] += 1
+                except discord.Forbidden:
+                    continue
 
     if delete_roles and not create_only_missing:
         for role in sorted(target.roles, key=lambda r: r.position, reverse=True):
@@ -338,25 +348,11 @@ async def apply_snapshot_to_guild(
                 except discord.Forbidden:
                     pass
 
-    if load_settings and not create_only_missing:
-        settings = snapshot.get("settings", {})
-        try:
-            await target.edit(
-                verification_level=discord.VerificationLevel(settings.get("verification_level", target.verification_level.value)),
-                default_notifications=discord.NotificationLevel(settings.get("default_notifications", target.default_notifications.value)),
-                explicit_content_filter=discord.ContentFilter(settings.get("explicit_content_filter", target.explicit_content_filter.value)),
-                afk_timeout=settings.get("afk_timeout", target.afk_timeout),
-                reason="CLINX backup load: update settings",
-            )
-            result["updated_settings"] = 1
-        except discord.Forbidden:
-            pass
-
     if load_channels:
-        category_map: dict[str, discord.CategoryChannel] = {}
+        category_map: dict[str, discord.CategoryChannel] = dict(precreated_categories)
 
         for cat_data in snapshot.get("categories", []):
-            existing = discord.utils.get(target.categories, name=cat_data["name"])
+            existing = category_map.get(cat_data["name"]) or discord.utils.get(target.categories, name=cat_data["name"])
             overwrites = deserialize_overwrites(cat_data.get("overwrites", []), target)
 
             if existing is None:
@@ -425,6 +421,20 @@ async def apply_snapshot_to_guild(
                     result["updated_channels"] += 1
             except discord.Forbidden:
                 pass
+
+    if load_settings and not create_only_missing:
+        settings = snapshot.get("settings", {})
+        try:
+            await target.edit(
+                verification_level=discord.VerificationLevel(settings.get("verification_level", target.verification_level.value)),
+                default_notifications=discord.NotificationLevel(settings.get("default_notifications", target.default_notifications.value)),
+                explicit_content_filter=discord.ContentFilter(settings.get("explicit_content_filter", target.explicit_content_filter.value)),
+                afk_timeout=settings.get("afk_timeout", target.afk_timeout),
+                reason="CLINX backup load: update settings",
+            )
+            result["updated_settings"] = 1
+        except discord.Forbidden:
+            pass
 
     return result
 
