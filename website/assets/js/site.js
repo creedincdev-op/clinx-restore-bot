@@ -1,295 +1,246 @@
-(function () {
-  const body = document.body;
-  const topbar = document.querySelector('.topbar');
-  const menuToggle = document.querySelector('.menu-toggle');
-  const mobileMenu = document.querySelector('#mobile-menu');
-  const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const homeSectionKey = 'clinx-home-section';
+const fadeTargets = document.querySelectorAll('.fade');
+    if ('IntersectionObserver' in window) {
+      const revealObserver = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('show');
+            revealObserver.unobserve(entry.target);
+          }
+        });
+      }, { threshold: 0.12 });
 
-  const normalizePath = (path) => {
-    const trimmed = path.replace(/\/index(?:\.html)?$/, '/');
-    return trimmed === '' ? '/' : trimmed;
-  };
-
-  const isHomePage = () => normalizePath(window.location.pathname) === '/';
-
-  const getAnchorOffset = () => {
-    return (topbar ? topbar.offsetHeight : 0) + 18;
-  };
-
-  const scrollToTarget = (target, behavior) => {
-    if (!target) {
-      return;
+      fadeTargets.forEach((el) => revealObserver.observe(el));
+    } else {
+      fadeTargets.forEach((el) => el.classList.add('show'));
     }
 
-    const top = Math.max(0, target.getBoundingClientRect().top + window.scrollY - getAnchorOffset());
-    window.scrollTo({
-      top,
-      behavior: prefersReducedMotion ? 'auto' : behavior,
-    });
-  };
+    const topbar = document.querySelector('.topbar');
+    const menuToggle = document.querySelector('.menu-toggle');
+    const mobileMenu = document.querySelector('#mobile-menu');
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const pageBody = document.body;
 
-  const closeMobileMenu = () => {
-    if (!topbar || !menuToggle || !mobileMenu) {
-      return;
-    }
-
-    topbar.classList.remove('menu-open');
-    menuToggle.setAttribute('aria-expanded', 'false');
-    mobileMenu.hidden = true;
-  };
-
-  const transitionTo = (href) => {
-    const destination = href || '/';
-    if (prefersReducedMotion || body.classList.contains('page-leaving')) {
-      window.location.href = destination;
-      return;
-    }
-
-    body.classList.add('page-leaving');
-    window.setTimeout(() => {
-      window.location.href = destination;
-    }, 260);
-  };
-
-  const fadeTargets = document.querySelectorAll('.fade');
-  if ('IntersectionObserver' in window) {
-    const revealObserver = new IntersectionObserver((entries) => {
-      entries.forEach((entry) => {
-        if (entry.isIntersecting) {
-          entry.target.classList.add('show');
-          revealObserver.unobserve(entry.target);
-        }
+    pageBody.classList.add('page-enhanced');
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        pageBody.classList.add('page-ready');
       });
-    }, { threshold: 0.12 });
+    });
 
-    fadeTargets.forEach((el) => revealObserver.observe(el));
-  } else {
-    fadeTargets.forEach((el) => el.classList.add('show'));
-  }
+    const getAnchorOffset = () => {
+      return (topbar ? topbar.offsetHeight : 0) + 18;
+    };
 
-  body.classList.add('page-enhanced');
-  window.requestAnimationFrame(() => {
-    body.classList.add('page-ready');
-  });
+    const scrollToTarget = (target, behavior = 'smooth') => {
+      if (!target) {
+        return;
+      }
 
-  window.addEventListener('pageshow', () => {
-    body.classList.remove('page-leaving');
-    body.classList.add('page-ready');
-  });
+      const top = Math.max(0, target.getBoundingClientRect().top + window.scrollY - getAnchorOffset());
+      window.scrollTo({
+        top,
+        behavior: prefersReducedMotion ? 'auto' : behavior,
+      });
+    };
 
-  if (menuToggle && mobileMenu) {
+    const closeMobileMenu = () => {
+      topbar.classList.remove('menu-open');
+      menuToggle.setAttribute('aria-expanded', 'false');
+      mobileMenu.hidden = true;
+    };
+
     menuToggle.addEventListener('click', () => {
       const isOpen = menuToggle.getAttribute('aria-expanded') === 'true';
       menuToggle.setAttribute('aria-expanded', String(!isOpen));
       mobileMenu.hidden = isOpen;
-      if (topbar) {
-        topbar.classList.toggle('menu-open', !isOpen);
-      }
+      topbar.classList.toggle('menu-open', !isOpen);
     });
 
     mobileMenu.querySelectorAll('a').forEach((link) => {
       link.addEventListener('click', () => closeMobileMenu());
     });
-  }
 
-  document.querySelectorAll('[data-section-link]').forEach((link) => {
-    link.addEventListener('click', (event) => {
-      const targetId = link.getAttribute('data-section-link');
-      if (!targetId) {
-        return;
-      }
+    document.querySelectorAll('a[href^="#"]').forEach((link) => {
+      link.addEventListener('click', (event) => {
+        const hash = link.getAttribute('href');
+        if (!hash || hash === '#') {
+          return;
+        }
 
-      if (isHomePage()) {
-        const target = document.getElementById(targetId);
+        const target = document.querySelector(hash);
         if (!target) {
           return;
         }
 
         event.preventDefault();
+        scrollToTarget(target);
+      });
+    });
+
+    window.addEventListener('resize', () => {
+      if (window.innerWidth > 720 && !mobileMenu.hidden) {
         closeMobileMenu();
-        scrollToTarget(target, 'smooth');
-        return;
       }
-
-      try {
-        window.sessionStorage.setItem(homeSectionKey, targetId);
-      } catch (error) {
-        // Ignore storage failures and continue home.
-      }
-
-      event.preventDefault();
-      closeMobileMenu();
-      transitionTo('/');
     });
-  });
 
-  if (isHomePage()) {
-    let pendingSection;
-
-    try {
-      pendingSection = window.sessionStorage.getItem(homeSectionKey);
-      window.sessionStorage.removeItem(homeSectionKey);
-    } catch (error) {
-      pendingSection = null;
-    }
-
-    if (pendingSection) {
-      window.requestAnimationFrame(() => {
-        window.setTimeout(() => {
-          scrollToTarget(document.getElementById(pendingSection), 'smooth');
-        }, 120);
-      });
-    }
-  }
-
-  document.querySelectorAll('a[data-page-transition="true"]').forEach((link) => {
-    link.addEventListener('click', (event) => {
-      if (event.defaultPrevented || link.hasAttribute('download')) {
-        return;
-      }
-
-      if (link.dataset.sectionLink) {
-        return;
-      }
-
-      const href = link.getAttribute('href');
-      if (!href || href.startsWith('#') || (link.target && link.target !== '_self')) {
-        return;
-      }
-
-      const url = new URL(href, window.location.href);
-      if (url.origin !== window.location.origin) {
-        return;
-      }
-
-      const next = url.pathname + url.search + url.hash;
-      const current = window.location.pathname + window.location.search + window.location.hash;
-      if (next === current) {
-        return;
-      }
-
-      event.preventDefault();
-      closeMobileMenu();
-      transitionTo(next);
+    window.addEventListener('pageshow', () => {
+      pageBody.classList.remove('page-leaving');
+      pageBody.classList.add('page-ready');
     });
-  });
 
-  window.addEventListener('resize', () => {
-    if (window.innerWidth > 760 && mobileMenu && !mobileMenu.hidden) {
-      closeMobileMenu();
-    }
-  });
-
-  document.querySelectorAll('[data-tablist]').forEach((tablist) => {
-    const tabs = Array.from(tablist.querySelectorAll('[role="tab"]'));
-    if (!tabs.length) {
-      return;
-    }
-
-    const activateTab = (tabToActivate, moveFocus) => {
-      tabs.forEach((tab) => {
-        const active = tab === tabToActivate;
-        tab.setAttribute('aria-selected', String(active));
-        tab.tabIndex = active ? 0 : -1;
-
-        const panelId = tab.getAttribute('aria-controls');
-        const panel = panelId ? document.getElementById(panelId) : null;
-        if (panel) {
-          panel.hidden = !active;
+    document.querySelectorAll('a[data-page-transition]').forEach((link) => {
+      link.addEventListener('click', (event) => {
+        if (event.defaultPrevented || event.button !== 0) {
+          return;
         }
-      });
 
-      if (moveFocus) {
-        tabToActivate.focus();
-      }
-    };
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+          return;
+        }
 
-    tabs.forEach((tab, index) => {
-      tab.addEventListener('click', () => activateTab(tab, false));
-      tab.addEventListener('keydown', (event) => {
-        let nextIndex = index;
+        if (link.target === '_blank' || link.hasAttribute('download')) {
+          return;
+        }
 
-        if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
-          nextIndex = (index + 1) % tabs.length;
-        } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
-          nextIndex = (index - 1 + tabs.length) % tabs.length;
-        } else if (event.key === 'Home') {
-          nextIndex = 0;
-        } else if (event.key === 'End') {
-          nextIndex = tabs.length - 1;
-        } else {
+        const url = new URL(link.href, window.location.href);
+        if (url.origin !== window.location.origin) {
           return;
         }
 
         event.preventDefault();
-        activateTab(tabs[nextIndex], true);
-      });
-    });
+        pageBody.classList.remove('page-ready');
+        pageBody.classList.add('page-leaving');
 
-    const defaultTab = tabs.find((tab) => tab.getAttribute('aria-selected') === 'true') || tabs[0];
-    activateTab(defaultTab, false);
-  });
-
-  const priceBlocks = Array.from(document.querySelectorAll('[data-plan-price]'));
-  const pricingNote = document.querySelector('[data-pricing-note]');
-
-  const renderFallbackPricing = () => {
-    priceBlocks.forEach((block) => {
-      const value = Number(block.getAttribute('data-price-inr'));
-      const target = block.querySelector('[data-price-value]');
-      if (target) {
-        target.textContent = `INR ${value.toFixed(2)}`;
-      }
-    });
-
-    if (pricingNote) {
-      pricingNote.textContent = 'Prices stay in INR by default and switch to local estimates when available.';
-    }
-  };
-
-  const renderPricing = (payload) => {
-    if (!payload || !payload.currency || !payload.prices) {
-      renderFallbackPricing();
-      return;
-    }
-
-    const locale = payload.locale || undefined;
-    const formatter = new Intl.NumberFormat(locale, {
-      style: 'currency',
-      currency: payload.currency,
-    });
-
-    priceBlocks.forEach((block) => {
-      const planKey = block.getAttribute('data-plan-price');
-      const amount = payload.prices[planKey];
-      const target = block.querySelector('[data-price-value]');
-      if (typeof amount !== 'number' || !target) {
-        return;
-      }
-
-      target.textContent = formatter.format(amount);
-    });
-
-    if (pricingNote) {
-      pricingNote.textContent = payload.message || 'Prices shown in your local currency.';
-    }
-  };
-
-  if (priceBlocks.length) {
-    window.fetch('/api/pricing')
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error('pricing unavailable');
+        if (!mobileMenu.hidden) {
+          closeMobileMenu();
         }
 
-        return response.json();
-      })
-      .then((payload) => {
-        renderPricing(payload);
-      })
-      .catch(() => {
-        renderFallbackPricing();
+        window.setTimeout(() => {
+          window.location.href = url.href;
+        }, prefersReducedMotion ? 0 : 280);
       });
-  }
-}());
+    });
+
+    const planPriceNodes = Array.from(document.querySelectorAll('.plans .plan .price'));
+    if (planPriceNodes.length) {
+      const defaultPlans = Object.freeze({
+        pro: 99,
+        proPlus: 199,
+        proUltra: 349,
+      });
+
+      const planKeysByIndex = ['pro', 'proPlus', 'proUltra'];
+      const premiumSection = document.querySelector('#premium .container');
+
+      let pricingContext = document.querySelector('[data-pricing-context]');
+      if (!pricingContext && premiumSection) {
+        const pricingMeta = document.createElement('p');
+        pricingMeta.className = 'pricing-meta';
+        pricingMeta.innerHTML = '<span data-pricing-context>Prices shown in INR for India. Regional currency estimates load automatically.</span> <a class="pricing-source" href="https://www.exchangerate-api.com" target="_blank" rel="noreferrer">Rates by ExchangeRate-API</a>';
+        premiumSection.appendChild(pricingMeta);
+        pricingContext = pricingMeta.querySelector('[data-pricing-context]');
+      }
+
+      const ensurePriceMarkup = () => {
+        planPriceNodes.forEach((node, index) => {
+          node.dataset.planKey = planKeysByIndex[index] || '';
+
+          if (node.querySelector('.price-amount')) {
+            return;
+          }
+
+          const amountNode = document.createElement('span');
+          amountNode.className = 'price-amount';
+          amountNode.textContent = node.childNodes[0] ? node.childNodes[0].textContent.trim() : '';
+
+          const perNode = node.querySelector('.per');
+          node.textContent = '';
+          node.appendChild(amountNode);
+
+          if (perNode) {
+            node.appendChild(document.createTextNode(' '));
+            node.appendChild(perNode);
+          }
+        });
+      };
+
+      const formatPrice = (amount, currency) => {
+        const locale = navigator.language || 'en-US';
+
+        try {
+          return new Intl.NumberFormat(locale, {
+            style: 'currency',
+            currency,
+            currencyDisplay: 'narrowSymbol',
+          }).format(amount);
+        } catch (error) {
+          return new Intl.NumberFormat('en-US', {
+            style: 'currency',
+            currency,
+            currencyDisplay: 'symbol',
+          }).format(amount);
+        }
+      };
+
+      const renderPlanPrices = (currency, plans) => {
+        ensurePriceMarkup();
+
+        planPriceNodes.forEach((node) => {
+          const planKey = node.dataset.planKey;
+          const amountNode = node.querySelector('.price-amount');
+          const amount = plans[planKey];
+
+          if (!amountNode || typeof amount !== 'number') {
+            return;
+          }
+
+          amountNode.textContent = formatPrice(amount, currency);
+        });
+      };
+
+      const updatePricingContext = (currency, fallback) => {
+        if (!pricingContext) {
+          return;
+        }
+
+        if (currency === 'INR') {
+          pricingContext.textContent = 'Prices shown in INR for India.';
+          return;
+        }
+
+        if (fallback && currency === 'USD') {
+          pricingContext.textContent = 'Showing USD estimates for your region. Final charge may vary slightly with exchange rates.';
+          return;
+        }
+
+        pricingContext.textContent = `Showing estimated prices in ${currency} for your region. Final charge may vary slightly with exchange rates.`;
+      };
+
+      renderPlanPrices('INR', defaultPlans);
+      updatePricingContext('INR', false);
+
+      fetch('/api/pricing', {
+        headers: {
+          accept: 'application/json',
+        },
+      })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error(`Pricing request failed with ${response.status}`);
+          }
+
+          return response.json();
+        })
+        .then((payload) => {
+          if (!payload || !payload.plans || !payload.displayCurrency) {
+            return;
+          }
+
+          renderPlanPrices(payload.displayCurrency, payload.plans);
+          updatePricingContext(payload.displayCurrency, Boolean(payload.fallback));
+        })
+        .catch(() => {
+          renderPlanPrices('INR', defaultPlans);
+          updatePricingContext('INR', true);
+        });
+    }
