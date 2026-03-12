@@ -288,6 +288,7 @@ async def apply_snapshot_to_guild(
         "updated_settings": 0,
     }
     precreated_categories: dict[str, discord.CategoryChannel] = {}
+    precreated_channels: set[str] = set()
 
     if delete_channels and not create_only_missing:
         for channel in list(target.channels):
@@ -297,14 +298,47 @@ async def apply_snapshot_to_guild(
             except discord.Forbidden:
                 pass
 
-        if load_channels:
-            for cat_data in snapshot.get("categories", []):
-                try:
-                    created_category = await target.create_category(name=cat_data["name"])
-                    precreated_categories[cat_data["name"]] = created_category
-                    result["created_categories"] += 1
-                except discord.Forbidden:
+    if load_channels and not create_only_missing:
+        structure_category_map: dict[str, discord.CategoryChannel] = {category.name: category for category in target.categories}
+
+        for cat_data in snapshot.get("categories", []):
+            if cat_data["name"] in structure_category_map:
+                continue
+            try:
+                created_category = await target.create_category(name=cat_data["name"])
+                precreated_categories[cat_data["name"]] = created_category
+                structure_category_map[cat_data["name"]] = created_category
+                result["created_categories"] += 1
+            except discord.Forbidden:
+                continue
+
+        for ch_data in snapshot.get("channels", []):
+            if discord.utils.get(target.channels, name=ch_data["name"]) is not None:
+                continue
+
+            category = structure_category_map.get(ch_data.get("category")) if ch_data.get("category") else None
+            try:
+                if ch_data["type"] == "text":
+                    await target.create_text_channel(
+                        name=ch_data["name"],
+                        category=category,
+                        topic=ch_data.get("topic"),
+                        slowmode_delay=ch_data.get("slowmode_delay", 0),
+                        nsfw=ch_data.get("nsfw", False),
+                    )
+                elif ch_data["type"] == "voice":
+                    await target.create_voice_channel(
+                        name=ch_data["name"],
+                        category=category,
+                        bitrate=ch_data.get("bitrate"),
+                        user_limit=ch_data.get("user_limit", 0),
+                    )
+                else:
                     continue
+                precreated_channels.add(ch_data["name"])
+                result["created_channels"] += 1
+            except discord.Forbidden:
+                continue
 
     if delete_roles and not create_only_missing:
         for role in sorted(target.roles, key=lambda r: r.position, reverse=True):
@@ -410,7 +444,8 @@ async def apply_snapshot_to_guild(
                         nsfw=ch_data.get("nsfw", False),
                         overwrites=overwrites,
                     )
-                    result["updated_channels"] += 1
+                    if ch_data["name"] not in precreated_channels:
+                        result["updated_channels"] += 1
                 elif isinstance(existing, discord.VoiceChannel) and ch_data["type"] == "voice":
                     await existing.edit(
                         category=category,
@@ -418,7 +453,8 @@ async def apply_snapshot_to_guild(
                         user_limit=ch_data.get("user_limit", 0),
                         overwrites=overwrites,
                     )
-                    result["updated_channels"] += 1
+                    if ch_data["name"] not in precreated_channels:
+                        result["updated_channels"] += 1
             except discord.Forbidden:
                 pass
 
