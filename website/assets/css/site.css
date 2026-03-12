@@ -806,10 +806,33 @@
       letter-spacing: -.015em;
     }
 
+    .price-amount {
+      display: inline-block;
+    }
+
     .per {
       color: #b8c9e6;
       font-size: .92rem;
       font-weight: 500;
+    }
+
+    .pricing-meta {
+      margin: 16px 0 0;
+      color: #9db8da;
+      font-size: .84rem;
+      line-height: 1.7;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      align-items: center;
+    }
+
+    .pricing-source {
+      color: #84dfff;
+    }
+
+    .pricing-source:hover {
+      color: #baf1ff;
     }
 
     .plan .body {
