@@ -6,12 +6,6 @@
 start.bat
 ```
 
-## 24/7 Hosting
-
-- Oracle Always Free: `ORACLE_ALWAYS_FREE.md`
-- Hosting summary: `HOSTING_24_7.md`
-- Render setup: `RENDER_UPTIME_ROBOT.md`
-
 ## Core Commands
 
 - `/backup create`
@@ -20,7 +14,6 @@ start.bat
 - `/backup delete`
 - `/backupcreate` (alias)
 - `/backupload` (alias)
-- `/backuplist` (alias)
 - `/restore_missing`
 - `/cleantoday`
 - `/masschannels`
@@ -41,15 +34,9 @@ start.bat
 - `/import status`
 - `/import cancel`
 
-## Panels
-
-- `/panel suggestion`
-  Posts the public CLINX suggestion board and keeps the command acknowledgement private.
-
-## Utility
+## Panels`n`n- `/panel boostrewards``n- `/panel suggestion``n`n## Utility
 
 - `/help`
-  Opens the interactive CLINX command library.
 - `/invite`
 - `/leave`
 
@@ -66,8 +53,6 @@ Then Confirm/Cancel buttons execute the selected plan.
 
 ## Mass Channel Paste Format
 
-`/masschannels` opens a modal so you can paste a larger layout in one or two chunks.
-
 ```text
 [Start Here]
 welcome | New members start here
@@ -78,13 +63,6 @@ rules | Read rules first
 chat
 media | Image and video sharing
 voice: Hangout VC
-
-GENERAL
-chat
-clips
-
-Support:
-# tickets | Open a ticket here
 ```
 
 

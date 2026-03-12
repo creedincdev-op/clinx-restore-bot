@@ -24,7 +24,3 @@ services:
         value: "180"
       - key: BOT_STARTUP_JITTER_MAX
         value: "45"
-      - key: DISCORD_ACTION_DELAY_SECONDS
-        value: "1.0"
-      - key: DISCORD_ACTION_RETRY_LIMIT
-        value: "5"
