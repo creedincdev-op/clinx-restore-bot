@@ -27,6 +27,7 @@ EMBED_ERR = 0xE74C3C
 EMBED_INFO = 0x3498DB
 
 IMPORT_JOBS: dict[int, dict[str, Any]] = {}
+BACKUP_LOAD_JOBS: dict[int, dict[str, Any]] = {}
 
 
 def utc_now_iso() -> str:
@@ -68,6 +69,33 @@ def load_backup_store() -> dict[str, Any]:
 def save_backup_store(store: dict[str, Any]) -> None:
     ensure_storage()
     BACKUP_FILE.write_text(json.dumps(store, indent=2), encoding="utf-8")
+
+
+def build_backup_load_status_description(job: dict[str, Any]) -> str:
+    desc = (
+        f"Status: `{job.get('status', 'unknown')}`\n"
+        f"Backup ID: `{job.get('backup_id', 'n/a')}`\n"
+        f"Started: `{job.get('started_at', 'n/a')}`"
+    )
+    if job.get("source_name") and job.get("target_name"):
+        desc += f"\nRoute: `{job['source_name']}` -> `{job['target_name']}`"
+    if job.get("finished_at"):
+        desc += f"\nFinished: `{job['finished_at']}`"
+    if job.get("stats"):
+        stats = job["stats"]
+        desc += (
+            f"\n\nDeleted roles: `{stats.get('deleted_roles', 0)}`"
+            f"\nDeleted channels: `{stats.get('deleted_channels', 0)}`"
+            f"\nCreated roles: `{stats.get('created_roles', 0)}`"
+            f"\nUpdated roles: `{stats.get('updated_roles', 0)}`"
+            f"\nCreated categories: `{stats.get('created_categories', 0)}`"
+            f"\nCreated channels: `{stats.get('created_channels', 0)}`"
+            f"\nUpdated channels: `{stats.get('updated_channels', 0)}`"
+            f"\nUpdated settings: `{stats.get('updated_settings', 0)}`"
+        )
+    if job.get("error"):
+        desc += f"\nError: `{job['error']}`"
+    return desc
 
 
 @dataclass
@@ -354,6 +382,7 @@ async def apply_snapshot_to_guild(
 
     if load_roles and not create_only_missing:
         existing_roles = {} if delete_roles else {role.name: role for role in target.roles}
+        role_order: list[tuple[discord.Role, int]] = []
         for role_data in sorted(snapshot.get("roles", []), key=lambda r: r.get("position", 0)):
             role = existing_roles.get(role_data["name"])
             permissions = discord.Permissions(role_data.get("permissions", 0))
@@ -370,6 +399,7 @@ async def apply_snapshot_to_guild(
                         reason="CLINX backup load: create role",
                     )
                     existing_roles[role_data["name"]] = created_role
+                    role_order.append((created_role, int(role_data.get("position", created_role.position))))
                     result["created_roles"] += 1
                 except discord.Forbidden:
                     pass
@@ -382,7 +412,22 @@ async def apply_snapshot_to_guild(
                         mentionable=role_data.get("mentionable", False),
                         reason="CLINX backup load: update role",
                     )
+                    role_order.append((role, int(role_data.get("position", role.position))))
                     result["updated_roles"] += 1
+                except discord.Forbidden:
+                    pass
+
+        bot_member = target.me
+        if role_order and bot_member is not None:
+            max_position = max(1, bot_member.top_role.position - 1)
+            position_map = {
+                role: min(desired_position, max_position)
+                for role, desired_position in role_order
+                if role < bot_member.top_role
+            }
+            if position_map:
+                try:
+                    await target.edit_role_positions(position_map)
                 except discord.Forbidden:
                     pass
 
@@ -481,6 +526,64 @@ async def apply_snapshot_to_guild(
     return result
 
 
+async def run_backup_load_job(
+    guild_id: int,
+    snapshot: dict[str, Any],
+    target: discord.Guild,
+    *,
+    backup_id: str,
+    source_name: str,
+    selected_actions: set[str],
+) -> None:
+    try:
+        stats = await apply_snapshot_to_guild(
+            snapshot,
+            target,
+            delete_roles="delete_roles" in selected_actions,
+            delete_channels="delete_channels" in selected_actions,
+            load_roles="load_roles" in selected_actions,
+            load_channels="load_channels" in selected_actions,
+            load_settings="load_settings" in selected_actions,
+            create_only_missing=False,
+        )
+        BACKUP_LOAD_JOBS[guild_id]["status"] = "completed"
+        BACKUP_LOAD_JOBS[guild_id]["finished_at"] = utc_now_iso()
+        BACKUP_LOAD_JOBS[guild_id]["stats"] = stats
+    except asyncio.CancelledError:
+        BACKUP_LOAD_JOBS[guild_id]["status"] = "cancelled"
+        BACKUP_LOAD_JOBS[guild_id]["finished_at"] = utc_now_iso()
+        raise
+    except Exception as exc:
+        BACKUP_LOAD_JOBS[guild_id]["status"] = "failed"
+        BACKUP_LOAD_JOBS[guild_id]["finished_at"] = utc_now_iso()
+        BACKUP_LOAD_JOBS[guild_id]["error"] = str(exc)
+
+
+class BackupLoadStatusButton(discord.ui.Button["BackupLoadStatusView"]):
+    def __init__(self, guild_id: int) -> None:
+        super().__init__(label="View Status", style=discord.ButtonStyle.primary)
+        self.guild_id = guild_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        job = BACKUP_LOAD_JOBS.get(self.guild_id)
+        if not job:
+            await interaction.response.send_message(
+                embed=make_embed("Backup Status", "No backup load job found for this server.", EMBED_INFO, interaction),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            embed=make_embed("Backup Status", build_backup_load_status_description(job), EMBED_INFO, interaction),
+            ephemeral=True,
+        )
+
+
+class BackupLoadStatusView(discord.ui.View):
+    def __init__(self, guild_id: int) -> None:
+        super().__init__(timeout=1800)
+        self.add_item(BackupLoadStatusButton(guild_id))
+
+
 class LoadActionSelect(discord.ui.Select):
     def __init__(self, parent_view: "LoadConfirmView") -> None:
         self.parent_view = parent_view
@@ -502,9 +605,11 @@ class LoadActionSelect(discord.ui.Select):
 
 
 class LoadConfirmView(discord.ui.View):
-    def __init__(self, author_id: int, snapshot: dict[str, Any], target: discord.Guild):
+    def __init__(self, author_id: int, backup_id: str, source_name: str, snapshot: dict[str, Any], target: discord.Guild):
         super().__init__(timeout=180)
         self.author_id = author_id
+        self.backup_id = backup_id
+        self.source_name = source_name
         self.snapshot = snapshot
         self.target = target
         self.selected_actions: set[str] = {"load_roles", "load_channels", "load_settings"}
@@ -518,45 +623,43 @@ class LoadConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Continue", style=discord.ButtonStyle.success)
     async def continue_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(
-            embed=make_embed("Applying Backup", "Working on selected actions...", EMBED_INFO, interaction),
-            view=self,
-        )
-
-        try:
-            stats = await apply_snapshot_to_guild(
-                self.snapshot,
-                self.target,
-                delete_roles="delete_roles" in self.selected_actions,
-                delete_channels="delete_channels" in self.selected_actions,
-                load_roles="load_roles" in self.selected_actions,
-                load_channels="load_channels" in self.selected_actions,
-                load_settings="load_settings" in self.selected_actions,
-                create_only_missing=False,
-            )
-        except Exception as exc:
-            await interaction.followup.send(
-                embed=make_embed("Backup Load Failed", f"Error: `{exc}`", EMBED_ERR, interaction),
+        existing_job = BACKUP_LOAD_JOBS.get(self.target.id)
+        if existing_job and existing_job.get("status") == "running":
+            await interaction.response.send_message(
+                embed=make_embed("Backup Busy", "A backup load is already running in this server. Use `/backup status` to check it.", EMBED_WARN, interaction),
                 ephemeral=True,
             )
-            self.stop()
             return
 
-        summary = (
-            f"Deleted roles: `{stats['deleted_roles']}`\n"
-            f"Deleted channels: `{stats['deleted_channels']}`\n"
-            f"Created roles: `{stats['created_roles']}`\n"
-            f"Updated roles: `{stats['updated_roles']}`\n"
-            f"Created categories: `{stats['created_categories']}`\n"
-            f"Created channels: `{stats['created_channels']}`\n"
-            f"Updated channels: `{stats['updated_channels']}`\n"
-            f"Updated settings: `{stats['updated_settings']}`"
+        for child in self.children:
+            child.disabled = True
+        task = asyncio.create_task(
+            run_backup_load_job(
+                self.target.id,
+                self.snapshot,
+                self.target,
+                backup_id=self.backup_id,
+                source_name=self.source_name,
+                selected_actions=set(self.selected_actions),
+            )
         )
-        await interaction.followup.send(
-            embed=make_embed("Backup Load Complete", summary, EMBED_OK, interaction),
-            ephemeral=True,
+        BACKUP_LOAD_JOBS[self.target.id] = {
+            "status": "running",
+            "started_at": utc_now_iso(),
+            "backup_id": self.backup_id,
+            "source_name": self.source_name,
+            "target_name": self.target.name,
+            "selected_actions": sorted(self.selected_actions),
+            "task": task,
+        }
+        await interaction.response.edit_message(
+            embed=make_embed(
+                "Info",
+                "The backup will start loading now. Please be patient, this can take a while!\n\nUse `/backup status` to get the current status and `/backup cancel` to cancel the process.\n\nThis message might not be updated.",
+                EMBED_INFO,
+                interaction,
+            ),
+            view=BackupLoadStatusView(self.target.id),
         )
         self.stop()
     async def on_timeout(self) -> None:
@@ -673,7 +776,13 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
         "Select what CLINX should load from this backup.\n"
         "Use the menu, then press Continue."
     )
-    view = LoadConfirmView(interaction.user.id, record["snapshot"], target)
+    view = LoadConfirmView(
+        interaction.user.id,
+        load_id,
+        record.get("source_guild_name", "Unknown Source"),
+        record["snapshot"],
+        target,
+    )
     await interaction.followup.send(embed=make_embed("Warning", warning, EMBED_WARN), view=view, ephemeral=True)
 
 
@@ -702,6 +811,44 @@ async def backup_delete(interaction: discord.Interaction, load_id: str) -> None:
     del store["backups"][load_id]
     save_backup_store(store)
     await interaction.response.send_message(embed=make_embed("Deleted", f"Removed `{load_id}`.", EMBED_OK), ephemeral=True)
+
+
+@backup_group.command(name="status", description="Get current backup load status")
+@app_commands.default_permissions(administrator=True)
+async def backup_status(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
+        return
+
+    job = BACKUP_LOAD_JOBS.get(guild.id)
+    if not job:
+        await interaction.response.send_message(embed=make_embed("Backup Status", "No backup load job found.", EMBED_INFO), ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        embed=make_embed("Backup Status", build_backup_load_status_description(job), EMBED_INFO, interaction),
+        ephemeral=True,
+    )
+
+
+@backup_group.command(name="cancel", description="Cancel running backup load")
+@app_commands.default_permissions(administrator=True)
+async def backup_cancel(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
+        return
+
+    job = BACKUP_LOAD_JOBS.get(guild.id)
+    if not job or job.get("status") != "running":
+        await interaction.response.send_message(embed=make_embed("Backup", "No running backup load to cancel.", EMBED_INFO), ephemeral=True)
+        return
+
+    task = job.get("task")
+    if task:
+        task.cancel()
+    await interaction.response.send_message(embed=make_embed("Backup", "Cancel requested.", EMBED_WARN), ephemeral=True)
 
 
 @bot.tree.command(name="backupcreate", description="Alias of /backup create")
@@ -828,29 +975,6 @@ async def masschannels(interaction: discord.Interaction, layout: str, create_cat
 
 
 
-class BoostPanelView(discord.ui.View):
-    def __init__(self) -> None:
-        super().__init__(timeout=300)
-        self.bot_select = discord.ui.Select(
-            placeholder="Choose custom bot",
-            min_values=1,
-            max_values=1,
-            options=[discord.SelectOption(label="Custom bot", value="custom_bot", emoji="🚀")],
-        )
-        self.bot_select.callback = self._on_select
-        self.add_item(self.bot_select)
-
-    async def _on_select(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
-
-    @discord.ui.button(label="Claim", style=discord.ButtonStyle.success)
-    async def claim(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await interaction.response.send_message(
-            embed=make_embed("Claim Submitted", "Boost reward claim received.", EMBED_OK, interaction),
-            ephemeral=True,
-        )
-
-
 class SuggestionModal(discord.ui.Modal, title="Suggestion Form"):
     title_input = discord.ui.TextInput(label="Title", placeholder="Feature title", max_length=100)
     details_input = discord.ui.TextInput(
@@ -876,26 +1000,6 @@ class SuggestionPanelView(discord.ui.View):
     @discord.ui.button(label="Suggestion", emoji="💡", style=discord.ButtonStyle.primary)
     async def open_suggestion(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(SuggestionModal())
-
-
-@panel_group.command(name="boostrewards", description="Send a boost rewards panel")
-async def panel_boost_rewards(interaction: discord.Interaction) -> None:
-    desc = (
-        "**Boost Rewards**\n\n"
-        "1 Boost Rewards\n"
-        "- Promote your server\n"
-        "- Access to use banner and /dmall\n\n"
-        "2 Boost Rewards\n"
-        "- 1.1 boost rewards + DM all bot source code\n"
-        "- 2.1 boost rewards + custom user install bot with host\n\n"
-        "**Custom bot**\n"
-        "User install bots work everywhere no need to add them to a server."
-    )
-    await interaction.response.send_message(
-        embed=make_embed("@everyone", desc, EMBED_INFO, interaction),
-        view=BoostPanelView(),
-    )
-
 
 @panel_group.command(name="suggestion", description="Send a suggestion form panel")
 async def panel_suggestion(interaction: discord.Interaction) -> None:
@@ -1131,10 +1235,11 @@ async def import_cancel(interaction: discord.Interaction) -> None:
 async def help_cmd(interaction: discord.Interaction) -> None:
     desc = (
         "`/backup create` `load` `list` `delete`\n"
+        "`/backup status` `cancel`\n"
         "`/restore_missing` `cleantoday` `masschannels`\n"
         "`/export guild|channels|channel|roles|role|message|reactions`\n"
         "`/import guild|status|cancel`\n"
-        "`/panel boostrewards|suggestion`\nAliases: `/backupcreate` and `/backupload`"
+        "`/panel suggestion`\nAliases: `/backupcreate` and `/backupload`"
     )
     await interaction.response.send_message(embed=make_embed("CLINX Help", desc, EMBED_INFO), ephemeral=True)
 
