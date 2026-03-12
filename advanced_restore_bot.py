@@ -17,6 +17,7 @@ from discord.ext import commands
 
 TOKEN = os.getenv("BOT_TOKEN")
 DEFAULT_BACKUP_GUILD_ID = os.getenv("DEFAULT_BACKUP_GUILD_ID")
+SUPPORT_URL = "https://discord.gg/V6YEw2Wxcb"
 
 DATA_DIR = Path(__file__).parent / "data"
 BACKUP_FILE = DATA_DIR / "backups.json"
@@ -104,6 +105,25 @@ class ParsedChannel:
     name: str
     topic: str | None
     category: str | None
+
+
+@dataclass(frozen=True)
+class CommandLibraryEntry:
+    path: str
+    summary: str
+    detail: str
+    visibility: str = "Public"
+    aliases: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CommandLibraryLane:
+    key: str
+    label: str
+    emoji: str
+    accent: int
+    blurb: str
+    entries: tuple[CommandLibraryEntry, ...]
 
 
 def clean_channel_name(raw: str) -> str:
@@ -675,6 +695,377 @@ class LoadConfirmView(discord.ui.View):
         self.stop()
 
 
+COMMAND_LIBRARY_LANES: tuple[CommandLibraryLane, ...] = (
+    CommandLibraryLane(
+        key="backup",
+        label="Backup",
+        emoji="<>",
+        accent=0x4F8CFF,
+        blurb="Snapshot, load, track, and manage recovery jobs.",
+        entries=(
+            CommandLibraryEntry("/backup create", "Create a recovery snapshot of the current server.", "Captures channels, roles, overwrites, and server settings into a reusable backup ID.", "Private", ("/backupcreate",)),
+            CommandLibraryEntry("/backup load", "Load a backup with lane selection and live status.", "Opens the restore planner so you can choose what to rebuild before CLINX touches the target server.", "Private", ("/backupload",)),
+            CommandLibraryEntry("/backup list", "List the most recent saved backup IDs.", "Shows the stored backup codes that are currently available to load or delete.", "Private"),
+            CommandLibraryEntry("/backup delete", "Remove a stored backup ID.", "Deletes a backup record from CLINX storage so it can no longer be loaded.", "Private"),
+            CommandLibraryEntry("/backup status", "Inspect the current load job.", "Returns the running state, route, and counters for the active restore job in this server.", "Private"),
+            CommandLibraryEntry("/backup cancel", "Cancel the current backup load.", "Stops the active restore task for this server if one is running.", "Private"),
+            CommandLibraryEntry("/backupcreate", "Alias for `/backup create`.", "Shortcut alias for creating a backup without using the group command.", "Private", ("/backup create",)),
+            CommandLibraryEntry("/backupload", "Alias for `/backup load`.", "Shortcut alias for opening the restore planner without using the group command.", "Private", ("/backup load",)),
+        ),
+    ),
+    CommandLibraryLane(
+        key="recovery",
+        label="Recovery",
+        emoji="<>",
+        accent=0x39C6A5,
+        blurb="High-impact recovery, rebuild, and cleanup operations.",
+        entries=(
+            CommandLibraryEntry("/restore_missing", "Recreate only the missing structure from a source server.", "Creates categories and channels that do not exist yet without wiping the target.", "Public"),
+            CommandLibraryEntry("/cleantoday", "Delete channels created today.", "Useful for nuked test runs and bad imports. Dry-run unless `confirm=true` is supplied.", "Public"),
+            CommandLibraryEntry("/masschannels", "Paste a layout and bulk-create the structure.", "Reads a copied category and channel layout, then recreates the structure in one pass.", "Public"),
+            CommandLibraryEntry("/import guild", "Import a full server snapshot JSON file.", "Runs a structured import job from an exported guild snapshot file.", "Private"),
+            CommandLibraryEntry("/import status", "Check the import job state.", "Returns running, finished, or failed status for the active import in this server.", "Private"),
+            CommandLibraryEntry("/import cancel", "Cancel the active import job.", "Stops the running import task if a guild import is in progress.", "Private"),
+        ),
+    ),
+    CommandLibraryLane(
+        key="export",
+        label="Export",
+        emoji="<>",
+        accent=0xF2B94B,
+        blurb="Pull clean JSON or CSV data out of the guild when you need a snapshot.",
+        entries=(
+            CommandLibraryEntry("/export guild", "Export the full guild snapshot as JSON.", "Captures the same snapshot structure CLINX uses for restore jobs.", "Private"),
+            CommandLibraryEntry("/export channels", "Export all channels as JSON or CSV.", "Useful for archiving channel names, types, topics, and positions.", "Private"),
+            CommandLibraryEntry("/export roles", "Export all roles as JSON or CSV.", "Dumps role metadata including permissions, color, and display state.", "Private"),
+            CommandLibraryEntry("/export channel", "Export one channel as JSON.", "Returns the serialized payload for a specific channel by ID.", "Private"),
+            CommandLibraryEntry("/export role", "Export one role as JSON.", "Returns the serialized payload for a specific role by ID.", "Private"),
+            CommandLibraryEntry("/export message", "Export one message as JSON.", "Captures a single message payload for audit or migration work.", "Private"),
+            CommandLibraryEntry("/export reactions", "Export message reactions as JSON or CSV.", "Serializes the reaction breakdown for a specific message.", "Private"),
+        ),
+    ),
+    CommandLibraryLane(
+        key="surfaces",
+        label="Surfaces",
+        emoji="<>",
+        accent=0x9A7CFF,
+        blurb="Operator-facing panels and public bot surfaces.",
+        entries=(
+            CommandLibraryEntry("/panel suggestion", "Post the CLINX ideas board in the current channel.", "Drops a standalone public board with suggestion and bug-report entry points.", "Private"),
+            CommandLibraryEntry("/help", "Open the CLINX command library.", "Browse command lanes, page through the catalog, and inspect each command in a single surface.", "Public"),
+            CommandLibraryEntry("/invite", "Get the bot invite link.", "Returns the OAuth invite for CLINX with bot and slash command scopes.", "Public"),
+            CommandLibraryEntry("/leave", "Make CLINX leave the current server.", "Tells the bot to exit the server immediately after confirmation.", "Private"),
+        ),
+    ),
+)
+
+COMMAND_LIBRARY_BY_KEY = {lane.key: lane for lane in COMMAND_LIBRARY_LANES}
+COMMAND_LIBRARY_BY_PATH = {entry.path: entry for lane in COMMAND_LIBRARY_LANES for entry in lane.entries}
+COMMAND_LIBRARY_PAGE_SIZE = 6
+
+
+def build_invite_url(app_id: int | None) -> str:
+    resolved_id = app_id or "YOUR_APP_ID"
+    return f"https://discord.com/oauth2/authorize?client_id={resolved_id}&permissions=8&integration_type=0&scope=bot+applications.commands"
+
+
+def format_command_library_page(lane: CommandLibraryLane, page: int) -> tuple[str, int]:
+    total_pages = max(1, (len(lane.entries) + COMMAND_LIBRARY_PAGE_SIZE - 1) // COMMAND_LIBRARY_PAGE_SIZE)
+    safe_page = max(0, min(page, total_pages - 1))
+    start = safe_page * COMMAND_LIBRARY_PAGE_SIZE
+    entries = lane.entries[start : start + COMMAND_LIBRARY_PAGE_SIZE]
+    lines = [f"- `/{entry.path.lstrip('/')}` - {entry.summary}" for entry in entries]
+    return "\n".join(lines), total_pages
+
+
+def format_command_library_detail(entry: CommandLibraryEntry | None) -> str:
+    if entry is None:
+        return (
+            "Pick a command from the selector below to inspect what it does, how visible it is, "
+            "and which alias CLINX accepts."
+        )
+
+    detail_lines = [
+        f"**`/{entry.path.lstrip('/')}`**",
+        entry.detail,
+        "",
+        f"**Visibility**: {entry.visibility}",
+    ]
+    if entry.aliases:
+        aliases = ", ".join(f"`{alias}`" for alias in entry.aliases)
+        detail_lines.append(f"**Aliases**: {aliases}")
+    return "\n".join(detail_lines)
+
+
+def build_feedback_card_view(
+    bot_user: discord.ClientUser | None,
+    *,
+    mode: str,
+    ticket_id: str,
+    title: str,
+    details: str,
+    operator: str,
+    outcome: str,
+) -> discord.ui.LayoutView:
+    title_text = discord.utils.escape_markdown(title.strip())
+    detail_text = discord.utils.escape_markdown(details.strip())
+    outcome_text = discord.utils.escape_markdown(outcome.strip())
+    operator_text = discord.utils.escape_markdown(operator)
+    accent = EMBED_OK if mode == "suggestion" else EMBED_WARN
+    badge = "Suggestion" if mode == "suggestion" else "Bug Report"
+
+    view = discord.ui.LayoutView(timeout=None)
+    header = discord.ui.Section(
+        discord.ui.TextDisplay(f"## <> {badge} Intake"),
+        discord.ui.TextDisplay(f"`{ticket_id}` filed by `{operator_text}`"),
+        accessory=discord.ui.Thumbnail(bot_user.display_avatar.url) if bot_user else discord.ui.Button(label="CLINX", disabled=True),
+    )
+    container = discord.ui.Container(
+        header,
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(f"### Title\n{title_text}"),
+        discord.ui.TextDisplay(f"### Brief\n{detail_text}"),
+        discord.ui.TextDisplay(f"### Outcome\n{outcome_text}"),
+        accent_color=accent,
+    )
+    view.add_item(container)
+    return view
+
+
+class CommandLibraryView(discord.ui.LayoutView):
+    def __init__(self, bot_user: discord.ClientUser | None) -> None:
+        super().__init__(timeout=600)
+        self.bot_user = bot_user
+        self.lane_key = COMMAND_LIBRARY_LANES[0].key
+        self.page = 0
+        self.selected_path: str | None = None
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        self.clear_items()
+
+        lane = COMMAND_LIBRARY_BY_KEY[self.lane_key]
+        page_text, total_pages = format_command_library_page(lane, self.page)
+        self.page = max(0, min(self.page, total_pages - 1))
+        entry = COMMAND_LIBRARY_BY_PATH.get(self.selected_path) if self.selected_path else None
+        total_commands = sum(len(group.entries) for group in COMMAND_LIBRARY_LANES)
+
+        thumbnail = (
+            discord.ui.Thumbnail(self.bot_user.display_avatar.url)
+            if self.bot_user
+            else discord.ui.Button(label="CLINX", disabled=True)
+        )
+        overview_badge = discord.ui.Button(
+            label=f"{lane.label} {self.page + 1}/{total_pages}",
+            style=discord.ButtonStyle.secondary,
+            disabled=True,
+        )
+        detail_badge = discord.ui.Button(
+            label="Focused" if entry else "Overview",
+            style=discord.ButtonStyle.secondary,
+            disabled=True,
+        )
+
+        container = discord.ui.Container(
+            discord.ui.Section(
+                discord.ui.TextDisplay("## <> Command Library"),
+                discord.ui.TextDisplay(
+                    f"Explore `{total_commands}` live commands across backup, recovery, export, and operator surfaces."
+                ),
+                accessory=thumbnail,
+            ),
+            discord.ui.Separator(),
+            discord.ui.Section(
+                discord.ui.TextDisplay(f"### {lane.label} Lane"),
+                discord.ui.TextDisplay(lane.blurb),
+                accessory=overview_badge,
+            ),
+            discord.ui.TextDisplay(page_text),
+            discord.ui.Separator(),
+            discord.ui.Section(
+                discord.ui.TextDisplay("### Command Detail"),
+                discord.ui.TextDisplay("Drill into one command without leaving the card."),
+                accessory=detail_badge,
+            ),
+            discord.ui.TextDisplay(format_command_library_detail(entry)),
+            accent_color=lane.accent,
+        )
+        self.add_item(container)
+
+        lane_row = discord.ui.ActionRow(
+            *[self._make_lane_button(group) for group in COMMAND_LIBRARY_LANES]
+        )
+        self.add_item(lane_row)
+        self.add_item(discord.ui.ActionRow(self._make_detail_select(lane)))
+        self.add_item(
+            discord.ui.ActionRow(
+                self._make_nav_button("Back", -1, self.page <= 0),
+                self._make_nav_button("Next", 1, self.page >= total_pages - 1),
+                discord.ui.Button(label="Invite", url=build_invite_url(self.bot_user.id if self.bot_user else None)),
+                discord.ui.Button(label="Support", url=SUPPORT_URL),
+            )
+        )
+
+    def _make_lane_button(self, lane: CommandLibraryLane) -> discord.ui.Button:
+        style = discord.ButtonStyle.primary if lane.key == self.lane_key else discord.ButtonStyle.secondary
+        button = discord.ui.Button(label=lane.label, style=style)
+
+        async def callback(interaction: discord.Interaction) -> None:
+            self.lane_key = lane.key
+            self.page = 0
+            self.selected_path = None
+            self.rebuild()
+            await interaction.response.edit_message(view=self)
+
+        button.callback = callback
+        return button
+
+    def _make_detail_select(self, lane: CommandLibraryLane) -> discord.ui.Select:
+        options = [
+            discord.SelectOption(
+                label=f"/{entry.path.lstrip('/')}",
+                description=entry.summary[:100],
+                value=entry.path,
+                default=entry.path == self.selected_path,
+            )
+            for entry in lane.entries
+        ]
+        select = discord.ui.Select(
+            custom_id=f"clinx-help-select:{lane.key}",
+            placeholder="Select a command for details...",
+            options=options,
+        )
+
+        async def callback(interaction: discord.Interaction) -> None:
+            self.selected_path = select.values[0]
+            self.rebuild()
+            await interaction.response.edit_message(view=self)
+
+        select.callback = callback
+        return select
+
+    def _make_nav_button(self, label: str, delta: int, disabled: bool) -> discord.ui.Button:
+        button = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, disabled=disabled)
+
+        async def callback(interaction: discord.Interaction) -> None:
+            lane = COMMAND_LIBRARY_BY_KEY[self.lane_key]
+            _, total_pages = format_command_library_page(lane, self.page)
+            self.page = max(0, min(self.page + delta, total_pages - 1))
+            self.selected_path = None
+            self.rebuild()
+            await interaction.response.edit_message(view=self)
+
+        button.callback = callback
+        return button
+
+
+class FeedbackModal(discord.ui.Modal):
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+        label = "Suggestion" if mode == "suggestion" else "Bug Report"
+        super().__init__(title=f"{label} Intake")
+        self.headline = discord.ui.TextInput(
+            label="Headline",
+            placeholder="Short summary",
+            max_length=100,
+        )
+        self.details = discord.ui.TextInput(
+            label="Details",
+            placeholder="Describe the idea, issue, or requested change.",
+            style=discord.TextStyle.paragraph,
+            max_length=1500,
+        )
+        self.outcome = discord.ui.TextInput(
+            label="Desired Outcome",
+            placeholder="What should happen instead?",
+            style=discord.TextStyle.paragraph,
+            max_length=600,
+            required=False,
+        )
+        self.add_item(self.headline)
+        self.add_item(self.details)
+        self.add_item(self.outcome)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        channel = interaction.channel
+        if channel is None or not hasattr(channel, "send"):
+            await interaction.response.send_message("CLINX could not resolve a messageable channel for this form.", ephemeral=True)
+            return
+
+        ticket_id = f"{'SG' if self.mode == 'suggestion' else 'BG'}-{datetime.now(timezone.utc).strftime('%d%H%M')}-{secrets.token_hex(2).upper()}"
+        card = build_feedback_card_view(
+            interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
+            mode=self.mode,
+            ticket_id=ticket_id,
+            title=self.headline.value,
+            details=self.details.value,
+            operator=interaction.user.display_name,
+            outcome=self.outcome.value or "No extra outcome note provided.",
+        )
+        try:
+            await channel.send(view=card)
+        except discord.Forbidden:
+            await interaction.response.send_message("CLINX cannot post the feedback card in this channel.", ephemeral=True)
+            return
+        await interaction.response.send_message(f"{'Suggestion' if self.mode == 'suggestion' else 'Bug report'} posted to {channel.mention}.", ephemeral=True)
+
+
+class SuggestionBoardView(discord.ui.LayoutView):
+    def __init__(self, bot_user: discord.ClientUser | None) -> None:
+        super().__init__(timeout=None)
+        self.bot_user = bot_user
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        self.clear_items()
+        hero_accessory = (
+            discord.ui.Thumbnail(self.bot_user.display_avatar.url)
+            if self.bot_user
+            else discord.ui.Button(label="CLINX", disabled=True)
+        )
+        badge = discord.ui.Button(label="Ideas Open", style=discord.ButtonStyle.secondary, disabled=True)
+        container = discord.ui.Container(
+            discord.ui.Section(
+                discord.ui.TextDisplay("## <> CLINX Feedback Board"),
+                discord.ui.TextDisplay("Drop product ideas, UI upgrades, restore flow pain points, or reproducible bug reports here."),
+                accessory=hero_accessory,
+            ),
+            discord.ui.Separator(),
+            discord.ui.Section(
+                discord.ui.TextDisplay("### Intake Rules"),
+                discord.ui.TextDisplay("Use **Suggestion** for product or UX requests. Use **Bug Report** when the current bot behavior is broken or inconsistent."),
+                accessory=badge,
+            ),
+            discord.ui.TextDisplay(
+                "### Routing\n"
+                "Submissions from this board are posted back into the channel as standalone CLINX cards so the thread stays visible."
+            ),
+            accent_color=0x6F8BFF,
+        )
+        self.add_item(container)
+        self.add_item(
+            discord.ui.ActionRow(
+                self._make_modal_button("Suggestion", "suggestion", discord.ButtonStyle.primary),
+                self._make_modal_button("Bug Report", "bug", discord.ButtonStyle.secondary),
+                discord.ui.Button(label="Support", url=SUPPORT_URL),
+            )
+        )
+
+    def _make_modal_button(
+        self,
+        label: str,
+        mode: str,
+        style: discord.ButtonStyle,
+    ) -> discord.ui.Button:
+        button = discord.ui.Button(label=label, style=style, custom_id=f"clinx:feedback:{mode}")
+
+        async def callback(interaction: discord.Interaction) -> None:
+            await interaction.response.send_modal(FeedbackModal(mode))
+
+        button.callback = callback
+        return button
+
+
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
@@ -692,6 +1083,7 @@ class ClinxBot(commands.Bot):
             self.tree.add_command(export_group)
             self.tree.add_command(import_group)
             self.tree.add_command(panel_group)
+            self.add_view(SuggestionBoardView(None))
             self._groups_added = True
 
         if not self._startup_synced:
@@ -705,7 +1097,7 @@ bot = ClinxBot(command_prefix=commands.when_mentioned, intents=intents)
 backup_group = app_commands.Group(name="backup", description="Backup and restore commands")
 export_group = app_commands.Group(name="export", description="Export server objects")
 import_group = app_commands.Group(name="import", description="Import server objects")
-panel_group = app_commands.Group(name="panel", description="Send styled embed panels")
+panel_group = app_commands.Group(name="panel", description="Send CLINX interactive surfaces")
 
 
 @bot.event
@@ -975,42 +1367,19 @@ async def masschannels(interaction: discord.Interaction, layout: str, create_cat
 
 
 
-class SuggestionModal(discord.ui.Modal, title="Suggestion Form"):
-    title_input = discord.ui.TextInput(label="Title", placeholder="Feature title", max_length=100)
-    details_input = discord.ui.TextInput(
-        label="Suggestion",
-        placeholder="Describe your idea...",
-        style=discord.TextStyle.paragraph,
-        max_length=1500,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(
-            embed=make_embed(
-                "Suggestion Received",
-                f"Title: `{self.title_input.value}`\nThanks for helping improve CLINX.",
-                EMBED_OK,
-                interaction,
-            ),
-            ephemeral=True,
-        )
-
-
-class SuggestionPanelView(discord.ui.View):
-    @discord.ui.button(label="Suggestion", emoji="💡", style=discord.ButtonStyle.primary)
-    async def open_suggestion(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await interaction.response.send_modal(SuggestionModal())
-
-@panel_group.command(name="suggestion", description="Send a suggestion form panel")
+@panel_group.command(name="suggestion", description="Post the CLINX feedback board")
 async def panel_suggestion(interaction: discord.Interaction) -> None:
-    desc = (
-        "Submit your idea to help improve the bot!\n\n"
-        "Click the Suggestion button below to open the submission form."
-    )
-    await interaction.response.send_message(
-        embed=make_embed("Suggestion Form", desc, EMBED_INFO, interaction),
-        view=SuggestionPanelView(),
-    )
+    channel = interaction.channel
+    if channel is None or not hasattr(channel, "send"):
+        await interaction.response.send_message(embed=make_embed("Error", "CLINX could not post the board in this channel.", EMBED_ERR, interaction), ephemeral=True)
+        return
+
+    try:
+        await channel.send(view=SuggestionBoardView(interaction.client.user if isinstance(interaction.client, commands.Bot) else None))
+    except discord.Forbidden:
+        await interaction.response.send_message(embed=make_embed("Error", "CLINX does not have permission to post the board in this channel.", EMBED_ERR, interaction), ephemeral=True)
+        return
+    await interaction.response.send_message(embed=make_embed("Board Posted", "The CLINX feedback board is now live in this channel.", EMBED_OK, interaction), ephemeral=True)
 async def send_text_file(interaction: discord.Interaction, text: str, filename: str) -> None:
     data = io.BytesIO(text.encode("utf-8"))
     await interaction.response.send_message(file=discord.File(data, filename=filename), ephemeral=True)
@@ -1231,23 +1600,15 @@ async def import_cancel(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=make_embed("Import", "Cancel requested.", EMBED_WARN), ephemeral=True)
 
 
-@bot.tree.command(name="help", description="Get command help")
+@bot.tree.command(name="help", description="Open the CLINX command library")
 async def help_cmd(interaction: discord.Interaction) -> None:
-    desc = (
-        "`/backup create` `load` `list` `delete`\n"
-        "`/backup status` `cancel`\n"
-        "`/restore_missing` `cleantoday` `masschannels`\n"
-        "`/export guild|channels|channel|roles|role|message|reactions`\n"
-        "`/import guild|status|cancel`\n"
-        "`/panel suggestion`\nAliases: `/backupcreate` and `/backupload`"
-    )
-    await interaction.response.send_message(embed=make_embed("CLINX Help", desc, EMBED_INFO), ephemeral=True)
+    await interaction.response.send_message(view=CommandLibraryView(interaction.client.user if isinstance(interaction.client, commands.Bot) else None))
 
 
 @bot.tree.command(name="invite", description="Get bot invite link")
 async def invite(interaction: discord.Interaction) -> None:
-    app_id = bot.user.id if bot.user else "YOUR_APP_ID"
-    link = f"https://discord.com/oauth2/authorize?client_id={app_id}&permissions=8&integration_type=0&scope=bot+applications.commands"
+    app_id = bot.user.id if bot.user else None
+    link = build_invite_url(app_id)
     await interaction.response.send_message(embed=make_embed("Invite CLINX", link, EMBED_INFO), ephemeral=True)
 
 
