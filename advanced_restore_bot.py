@@ -30,6 +30,8 @@ EMBED_INFO = 0x3498DB
 IMPORT_JOBS: dict[int, dict[str, Any]] = {}
 ACTION_DELAY_SECONDS = max(0.0, float(os.getenv("DISCORD_ACTION_DELAY_SECONDS", "1.0")))
 ACTION_RETRY_LIMIT = max(1, int(os.getenv("DISCORD_ACTION_RETRY_LIMIT", "5")))
+ACTION_GATE_LOCK: asyncio.Lock | None = None
+ACTION_LAST_DISPATCH_AT = 0.0
 T = TypeVar("T")
 
 
@@ -489,22 +491,39 @@ def extract_retry_after(exc: discord.HTTPException, fallback: float) -> float:
     return fallback
 
 
+def get_action_gate_lock() -> asyncio.Lock:
+    global ACTION_GATE_LOCK
+    if ACTION_GATE_LOCK is None:
+        ACTION_GATE_LOCK = asyncio.Lock()
+    return ACTION_GATE_LOCK
+
+
 async def throttled_discord_call(factory: Callable[[], Awaitable[T]]) -> T:
+    global ACTION_LAST_DISPATCH_AT
     last_error: discord.HTTPException | None = None
 
     for _ in range(ACTION_RETRY_LIMIT):
-        try:
-            result = await factory()
-        except discord.HTTPException as exc:
-            if exc.status != 429:
-                raise
-            last_error = exc
-            await asyncio.sleep(extract_retry_after(exc, ACTION_DELAY_SECONDS or 1.0))
-            continue
+        retry_after: float | None = None
+        async with get_action_gate_lock():
+            if ACTION_DELAY_SECONDS > 0:
+                elapsed = time.monotonic() - ACTION_LAST_DISPATCH_AT
+                if elapsed < ACTION_DELAY_SECONDS:
+                    await asyncio.sleep(ACTION_DELAY_SECONDS - elapsed)
 
-        if ACTION_DELAY_SECONDS > 0:
-            await asyncio.sleep(ACTION_DELAY_SECONDS)
-        return result
+            try:
+                result = await factory()
+            except discord.HTTPException as exc:
+                ACTION_LAST_DISPATCH_AT = time.monotonic()
+                if exc.status != 429:
+                    raise
+                last_error = exc
+                retry_after = extract_retry_after(exc, max(ACTION_DELAY_SECONDS, 0.75))
+            else:
+                ACTION_LAST_DISPATCH_AT = time.monotonic()
+                return result
+
+        if retry_after is not None:
+            await asyncio.sleep(retry_after)
 
     if last_error is not None:
         raise last_error
@@ -1038,6 +1057,43 @@ def render_backup_guardrail_lines(selected_actions: set[str]) -> str:
     return "\n".join(lines)
 
 
+def render_backup_result_lines(stats: dict[str, int]) -> str:
+    lines = [
+        f"• **{stats['deleted_roles']}** roles deleted",
+        f"• **{stats['created_roles']}** roles created",
+        f"• **{stats['updated_roles']}** roles updated",
+        f"• **{stats['deleted_channels']}** channels deleted",
+        f"• **{stats['created_categories']}** categories created",
+        f"• **{stats['created_channels']}** channels created",
+        f"• **{stats['updated_channels']}** channels updated",
+        f"• **{stats['updated_settings']}** settings synced",
+    ]
+    return "\n".join(lines)
+
+
+def build_backup_operation_embed(
+    *,
+    title: str,
+    backup_id: str,
+    source_name: str,
+    target_name: str,
+    selected_actions: set[str],
+    changes_title: str,
+    changes_body: str,
+    color: int,
+) -> discord.Embed:
+    return make_embed(
+        title,
+        (
+            f"**Backup Vault**\n`{backup_id}`\n\n"
+            f"**Route**\n`{source_name}` -> `{target_name}`\n\n"
+            f"**Restore Lanes**\n{render_backup_lane_lines(selected_actions)}\n\n"
+            f"**{changes_title}**\n{changes_body}"
+        ),
+        color,
+    )
+
+
 def render_backup_detail_lines(snapshot: dict[str, Any], target: discord.Guild, selected_actions: set[str], plan: dict[str, int]) -> str:
     detail_lines = [
         f"**Source Server**\n`{snapshot.get('source_guild_name', 'Unknown Source')}`",
@@ -1178,6 +1234,7 @@ class BackupLoadContinueButton(discord.ui.Button["BackupLoadPlannerView"]):
             await interaction.response.send_message("Only the command user can use these controls.", ephemeral=True)
             return
 
+        plan = build_backup_plan_preview(self.snapshot, self.target, self.selected_actions)
         await interaction.response.edit_message(
             view=BackupLoadStatusView(
                 title="## `<>` Applying Backup",
@@ -1186,6 +1243,26 @@ class BackupLoadContinueButton(discord.ui.Button["BackupLoadPlannerView"]):
                 accent_color=BACKUP_PLANNER_ACCENT,
             )
         )
+
+        public_status_message: discord.Message | None = None
+        channel = interaction.channel
+        if interaction.guild is not None and channel is not None and hasattr(channel, "send"):
+            try:
+                public_status_message = await channel.send(
+                    embed=build_backup_operation_embed(
+                        title="Backup Load Started",
+                        backup_id=self.backup_id,
+                        source_name=self.source_name,
+                        target_name=self.target.name,
+                        selected_actions=self.selected_actions,
+                        changes_title="Planned Changes",
+                        changes_body=render_backup_plan_lines(plan),
+                        color=BACKUP_PLANNER_ACCENT,
+                    ),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                public_status_message = None
 
         try:
             stats = await apply_snapshot_to_guild(
@@ -1199,6 +1276,22 @@ class BackupLoadContinueButton(discord.ui.Button["BackupLoadPlannerView"]):
                 create_only_missing=False,
             )
         except Exception as exc:
+            if public_status_message is not None:
+                try:
+                    await public_status_message.edit(
+                        embed=build_backup_operation_embed(
+                            title="Backup Load Failed",
+                            backup_id=self.backup_id,
+                            source_name=self.source_name,
+                            target_name=self.target.name,
+                            selected_actions=self.selected_actions,
+                            changes_title="Failure Details",
+                            changes_body=f"`{exc}`",
+                            color=EMBED_ERR,
+                        )
+                    )
+                except discord.HTTPException:
+                    pass
             await interaction.edit_original_response(
                 view=BackupLoadStatusView(
                     title="## `x` Backup Load Failed",
@@ -1209,16 +1302,23 @@ class BackupLoadContinueButton(discord.ui.Button["BackupLoadPlannerView"]):
             )
             return
 
-        result_body = (
-            f"• **{stats['deleted_roles']}** roles deleted\n"
-            f"• **{stats['created_roles']}** roles created\n"
-            f"• **{stats['updated_roles']}** roles updated\n"
-            f"• **{stats['deleted_channels']}** channels deleted\n"
-            f"• **{stats['created_categories']}** categories created\n"
-            f"• **{stats['created_channels']}** channels created\n"
-            f"• **{stats['updated_channels']}** channels updated\n"
-            f"• **{stats['updated_settings']}** settings synced"
-        )
+        result_body = render_backup_result_lines(stats)
+        if public_status_message is not None:
+            try:
+                await public_status_message.edit(
+                    embed=build_backup_operation_embed(
+                        title="Backup Load Complete",
+                        backup_id=self.backup_id,
+                        source_name=self.source_name,
+                        target_name=self.target.name,
+                        selected_actions=self.selected_actions,
+                        changes_title="Applied Changes",
+                        changes_body=result_body,
+                        color=EMBED_OK,
+                    )
+                )
+            except discord.HTTPException:
+                pass
         await interaction.edit_original_response(
             view=BackupLoadStatusView(
                 title="## `<>` Backup Rebuild Complete",
@@ -1276,7 +1376,9 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
         self.author_id = author_id
         self.snapshot = snapshot
         self.target = target
-        self.selected_actions = normalize_backup_actions(set(selected_actions or {"load_roles", "load_channels", "load_settings"}))
+        self.selected_actions = normalize_backup_actions(
+            set(selected_actions or {"load_roles", "load_channels", "load_settings", "delete_roles", "delete_channels"})
+        )
         self.detail_mode = detail_mode
 
         plan = build_backup_plan_preview(snapshot, target, self.selected_actions)
@@ -1292,12 +1394,12 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
             discord.ui.Container(
                 discord.ui.TextDisplay("## `<>` Backup Load Planner"),
                 discord.ui.TextDisplay(
-                    "Stage a controlled rebuild before CLINX touches the live server. Wipe lanes stay locked until their matching rebuild lanes are armed."
+                    "Stage the rebuild first. Wipe lanes unlock only when the matching rebuild lane is armed."
                 ),
                 discord.ui.Separator(),
                 discord.ui.Section(
-                    discord.ui.TextDisplay(f"**Backup Vault**\n`{backup_id}`"),
-                    discord.ui.TextDisplay(f"**Route**\n`{source_name}` -> `{target.name}`"),
+                    discord.ui.TextDisplay(f"### Backup Vault\n`{backup_id}`"),
+                    discord.ui.TextDisplay(f"### Route\n`{source_name}` -> `{target.name}`"),
                     accessory=discord.ui.Button(
                         label=f"{selected_count} staged",
                         style=discord.ButtonStyle.secondary,
@@ -1306,8 +1408,8 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
                 ),
                 discord.ui.Separator(),
                 discord.ui.Section(
-                    discord.ui.TextDisplay(f"**Restore Lanes**\n{render_backup_lane_lines(self.selected_actions)}"),
-                    discord.ui.TextDisplay(f"**Projected Changes**\n{render_backup_plan_lines(plan)}"),
+                    discord.ui.TextDisplay(f"### Restore Lanes\n{render_backup_lane_lines(self.selected_actions)}"),
+                    discord.ui.TextDisplay(f"### Projected Changes\n{render_backup_plan_lines(plan)}"),
                     accessory=discord.ui.Button(
                         label=run_mode_label,
                         style=discord.ButtonStyle.secondary,
@@ -1315,7 +1417,7 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
                     ),
                 ),
                 discord.ui.Separator(),
-                discord.ui.TextDisplay(f"**Safety Locks**\n{render_backup_guardrail_lines(self.selected_actions)}"),
+                discord.ui.TextDisplay(f"### Safety Locks\n{render_backup_guardrail_lines(self.selected_actions)}"),
                 discord.ui.Separator(),
                 discord.ui.TextDisplay(detail_block),
                 accent_color=BACKUP_PLANNER_ACCENT,
