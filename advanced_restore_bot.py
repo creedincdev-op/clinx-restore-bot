@@ -1018,8 +1018,7 @@ class BackupLoadActionButton(discord.ui.Button["BackupLoadPlannerView"]):
         elif is_selected:
             style = discord.ButtonStyle.primary
 
-        row = 1 if action_key in {"delete_roles", "delete_channels", "load_roles"} else 2
-        super().__init__(label=BACKUP_ACTION_LABELS[action_key], style=style, row=row)
+        super().__init__(label=BACKUP_ACTION_LABELS[action_key], style=style)
         self.backup_id = backup_id
         self.source_name = source_name
         self.author_id = author_id
@@ -1068,7 +1067,6 @@ class BackupLoadDetailButton(discord.ui.Button["BackupLoadPlannerView"]):
         super().__init__(
             label="Hide Detail" if detail_mode else "View Detail",
             style=discord.ButtonStyle.secondary,
-            row=2,
         )
         self.backup_id = backup_id
         self.source_name = source_name
@@ -1111,7 +1109,6 @@ class BackupLoadContinueButton(discord.ui.Button["BackupLoadPlannerView"]):
             label="Continue",
             style=discord.ButtonStyle.success,
             disabled=not selected_actions,
-            row=3,
         )
         self.backup_id = backup_id
         self.source_name = source_name
@@ -1178,7 +1175,7 @@ class BackupLoadContinueButton(discord.ui.Button["BackupLoadPlannerView"]):
 
 class BackupLoadCancelButton(discord.ui.Button["BackupLoadPlannerView"]):
     def __init__(self) -> None:
-        super().__init__(label="Cancel", style=discord.ButtonStyle.danger, row=3)
+        super().__init__(label="Cancel", style=discord.ButtonStyle.danger)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.edit_message(
@@ -1256,8 +1253,8 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
             )
         )
 
-        for action_key in BACKUP_ACTION_ORDER:
-            self.add_item(
+        self.add_item(
+            discord.ui.ActionRow(
                 BackupLoadActionButton(
                     backup_id=backup_id,
                     source_name=source_name,
@@ -1266,32 +1263,77 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
                     target=target,
                     selected_actions=self.selected_actions,
                     detail_mode=detail_mode,
-                    action_key=action_key,
-                )
+                    action_key="delete_roles",
+                ),
+                BackupLoadActionButton(
+                    backup_id=backup_id,
+                    source_name=source_name,
+                    author_id=author_id,
+                    snapshot=snapshot,
+                    target=target,
+                    selected_actions=self.selected_actions,
+                    detail_mode=detail_mode,
+                    action_key="delete_channels",
+                ),
+                BackupLoadActionButton(
+                    backup_id=backup_id,
+                    source_name=source_name,
+                    author_id=author_id,
+                    snapshot=snapshot,
+                    target=target,
+                    selected_actions=self.selected_actions,
+                    detail_mode=detail_mode,
+                    action_key="load_roles",
+                ),
             )
+        )
 
         self.add_item(
-            BackupLoadDetailButton(
-                backup_id=backup_id,
-                source_name=source_name,
-                author_id=author_id,
-                snapshot=snapshot,
-                target=target,
-                selected_actions=self.selected_actions,
-                detail_mode=detail_mode,
+            discord.ui.ActionRow(
+                BackupLoadActionButton(
+                    backup_id=backup_id,
+                    source_name=source_name,
+                    author_id=author_id,
+                    snapshot=snapshot,
+                    target=target,
+                    selected_actions=self.selected_actions,
+                    detail_mode=detail_mode,
+                    action_key="load_channels",
+                ),
+                BackupLoadActionButton(
+                    backup_id=backup_id,
+                    source_name=source_name,
+                    author_id=author_id,
+                    snapshot=snapshot,
+                    target=target,
+                    selected_actions=self.selected_actions,
+                    detail_mode=detail_mode,
+                    action_key="load_settings",
+                ),
+                BackupLoadDetailButton(
+                    backup_id=backup_id,
+                    source_name=source_name,
+                    author_id=author_id,
+                    snapshot=snapshot,
+                    target=target,
+                    selected_actions=self.selected_actions,
+                    detail_mode=detail_mode,
+                ),
             )
         )
         self.add_item(
-            BackupLoadContinueButton(
-                backup_id=backup_id,
-                source_name=source_name,
-                author_id=author_id,
-                snapshot=snapshot,
-                target=target,
-                selected_actions=self.selected_actions,
+            discord.ui.ActionRow(
+                BackupLoadContinueButton(
+                    backup_id=backup_id,
+                    source_name=source_name,
+                    author_id=author_id,
+                    snapshot=snapshot,
+                    target=target,
+                    selected_actions=self.selected_actions,
+                ),
+                BackupLoadCancelButton(),
             )
         )
-        self.add_item(BackupLoadCancelButton())
 
 
 intents = discord.Intents.default()
@@ -1682,7 +1724,6 @@ class SuggestionBoardLaunchButton(discord.ui.Button["SuggestionBoardView"]):
             style=style,
             custom_id=custom_id,
             emoji=emoji,
-            row=1,
         )
         self.feedback_kind = feedback_kind
 
@@ -1713,29 +1754,26 @@ class SuggestionBoardView(discord.ui.LayoutView):
         )
         self.add_item(board)
         self.add_item(
-            SuggestionBoardLaunchButton(
-                "Suggestion",
-                label="Submit Suggestion",
-                style=discord.ButtonStyle.primary,
-                custom_id="suggestion-board-open-suggestion",
-                emoji="💡",
-            )
-        )
-        self.add_item(
-            SuggestionBoardLaunchButton(
-                "Bug Report",
-                label="Report Bug",
-                style=discord.ButtonStyle.secondary,
-                custom_id="suggestion-board-open-bug",
-                emoji="🛠️",
-            )
-        )
-        self.add_item(
-            discord.ui.Button(
-                label="Support",
-                style=discord.ButtonStyle.link,
-                url=SUPPORT_SERVER_URL,
-                row=1,
+            discord.ui.ActionRow(
+                SuggestionBoardLaunchButton(
+                    "Suggestion",
+                    label="Submit Suggestion",
+                    style=discord.ButtonStyle.primary,
+                    custom_id="suggestion-board-open-suggestion",
+                    emoji="💡",
+                ),
+                SuggestionBoardLaunchButton(
+                    "Bug Report",
+                    label="Report Bug",
+                    style=discord.ButtonStyle.secondary,
+                    custom_id="suggestion-board-open-bug",
+                    emoji="🛠️",
+                ),
+                discord.ui.Button(
+                    label="Support",
+                    style=discord.ButtonStyle.link,
+                    url=SUPPORT_SERVER_URL,
+                ),
             )
         )
 
@@ -1754,7 +1792,6 @@ class LibraryCategoryButton(discord.ui.Button["CommandLibraryView"]):
         super().__init__(
             label=category,
             style=discord.ButtonStyle.primary if category == current_category else discord.ButtonStyle.secondary,
-            row=1,
         )
         self.category = category
 
@@ -1770,7 +1807,6 @@ class LibraryPageButton(discord.ui.Button["CommandLibraryView"]):
             label="Prev" if direction < 0 else "Next",
             style=discord.ButtonStyle.secondary,
             disabled=target_page < 0 or target_page > max_page,
-            row=3,
         )
         self.direction = direction
         self.category = category
@@ -1807,7 +1843,6 @@ class LibraryCommandSelect(discord.ui.Select["CommandLibraryView"]):
         super().__init__(
             placeholder="Select a command for details...",
             options=options,
-            row=2,
         )
         self.category = category
         self.page = page
@@ -1859,40 +1894,40 @@ class CommandLibraryView(discord.ui.LayoutView):
             )
         )
 
-        for category_name in categories:
-            self.add_item(LibraryCategoryButton(category_name, self.category))
-
-        self.add_item(LibraryCommandSelect(self.category, self.page, self.selected_command))
         self.add_item(
-            LibraryPageButton(
-                direction=-1,
-                category=self.category,
-                page=self.page,
-                selected_command=self.selected_command,
+            discord.ui.ActionRow(
+                *(LibraryCategoryButton(category_name, self.category) for category_name in categories)
             )
         )
         self.add_item(
-            LibraryPageButton(
-                direction=1,
-                category=self.category,
-                page=self.page,
-                selected_command=self.selected_command,
+            discord.ui.ActionRow(
+                LibraryCommandSelect(self.category, self.page, self.selected_command)
             )
         )
         self.add_item(
-            discord.ui.Button(
-                label="Invite",
-                style=discord.ButtonStyle.link,
-                url=build_invite_link(),
-                row=3,
-            )
-        )
-        self.add_item(
-            discord.ui.Button(
-                label="Support",
-                style=discord.ButtonStyle.link,
-                url=SUPPORT_SERVER_URL,
-                row=3,
+            discord.ui.ActionRow(
+                LibraryPageButton(
+                    direction=-1,
+                    category=self.category,
+                    page=self.page,
+                    selected_command=self.selected_command,
+                ),
+                LibraryPageButton(
+                    direction=1,
+                    category=self.category,
+                    page=self.page,
+                    selected_command=self.selected_command,
+                ),
+                discord.ui.Button(
+                    label="Invite",
+                    style=discord.ButtonStyle.link,
+                    url=build_invite_link(),
+                ),
+                discord.ui.Button(
+                    label="Support",
+                    style=discord.ButtonStyle.link,
+                    url=SUPPORT_SERVER_URL,
+                ),
             )
         )
 
