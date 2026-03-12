@@ -29,6 +29,7 @@ body {
     radial-gradient(700px 360px at 95% -10%, rgba(143,140,255,.14), transparent 60%),
     linear-gradient(180deg, #081120 0%, #070e1d 36%, #06090f 100%);
   font-family: 'Plus Jakarta Sans', sans-serif;
+  overflow-x: hidden;
 }
 
 a {
@@ -39,6 +40,25 @@ a {
 .page {
   min-height: 100vh;
   position: relative;
+}
+
+body.page-enhanced .page {
+  opacity: 0;
+  transform: translateY(18px) scale(.992);
+  filter: blur(10px);
+  transition: opacity .45s ease, transform .45s ease, filter .45s ease;
+}
+
+body.page-ready .page {
+  opacity: 1;
+  transform: none;
+  filter: none;
+}
+
+body.page-leaving .page {
+  opacity: 0;
+  transform: translateY(-12px) scale(.992);
+  filter: blur(12px);
 }
 
 .page::before {
