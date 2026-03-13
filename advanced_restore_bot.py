@@ -518,7 +518,14 @@ def serialize_overwrites(overwrites: dict[Any, discord.PermissionOverwrite]) -> 
     return out
 
 
-def deserialize_overwrites(entries: list[dict[str, Any]], guild: discord.Guild) -> dict[Any, discord.PermissionOverwrite]:
+def deserialize_overwrites(
+    entries: list[dict[str, Any]],
+    guild: discord.Guild,
+    *,
+    role_id_index: dict[int, discord.Role] | None = None,
+    role_name_index: dict[str, discord.Role] | None = None,
+    member_id_index: dict[int, discord.Member] | None = None,
+) -> dict[Any, discord.PermissionOverwrite]:
     built: dict[Any, discord.PermissionOverwrite] = {}
     for entry in entries:
         allow = discord.Permissions(entry.get("allow", 0))
@@ -527,9 +534,20 @@ def deserialize_overwrites(entries: list[dict[str, Any]], guild: discord.Guild) 
 
         target = None
         if entry.get("target_type") == "role":
-            target = guild.get_role(entry.get("target_id")) or discord.utils.get(guild.roles, name=entry.get("target_name"))
+            target_id = entry.get("target_id")
+            target_name = entry.get("target_name")
+            if role_id_index is not None and isinstance(target_id, int):
+                target = role_id_index.get(target_id)
+            if target is None and role_name_index is not None and target_name:
+                target = role_name_index.get(str(target_name))
+            if target is None:
+                target = guild.get_role(target_id) or discord.utils.get(guild.roles, name=target_name)
         elif entry.get("target_type") == "member":
-            target = guild.get_member(entry.get("target_id"))
+            target_id = entry.get("target_id")
+            if member_id_index is not None and isinstance(target_id, int):
+                target = member_id_index.get(target_id)
+            if target is None:
+                target = guild.get_member(target_id)
 
         if target is not None:
             built[target] = overwrite
@@ -897,10 +915,19 @@ async def apply_snapshot_to_guild(
         await report("Finalizing Channels", "Binding channel permissions, topics, and structure against the rebuilt role stack.")
         category_map: dict[str, discord.CategoryChannel] = dict(precreated_categories)
         existing_categories = {} if delete_channels else {category.name: category for category in target.categories}
+        role_id_index = {role.id: role for role in target.roles}
+        role_name_index = {role.name: role for role in target.roles}
+        member_id_index = {member.id: member for member in target.members}
 
         for cat_data in snapshot.get("categories", []):
             existing = category_map.get(cat_data["name"]) or existing_categories.get(cat_data["name"])
-            overwrites = deserialize_overwrites(cat_data.get("overwrites", []), target)
+            overwrites = deserialize_overwrites(
+                cat_data.get("overwrites", []),
+                target,
+                role_id_index=role_id_index,
+                role_name_index=role_name_index,
+                member_id_index=member_id_index,
+            )
 
             if existing is None:
                 try:
@@ -921,7 +948,13 @@ async def apply_snapshot_to_guild(
             channel_key = snapshot_channel_signature(ch_data)
             existing = precreated_channels.get(channel_key) or existing_channels.get(channel_key)
             category = category_map.get(ch_data.get("category")) if ch_data.get("category") else None
-            overwrites = deserialize_overwrites(ch_data.get("overwrites", []), target)
+            overwrites = deserialize_overwrites(
+                ch_data.get("overwrites", []),
+                target,
+                role_id_index=role_id_index,
+                role_name_index=role_name_index,
+                member_id_index=member_id_index,
+            )
 
             if existing is None:
                 try:
@@ -1265,15 +1298,26 @@ def build_backup_hierarchy_warnings(
     if "load_roles" in selected_actions:
         if not bot_member.guild_permissions.manage_roles:
             warnings.append("CLINX is missing **Manage Roles** in the target server.")
-        blocked_role_count = sum(
-            1
-            for role in snapshot.get("roles", [])
-            if int(role.get("position", 0)) >= bot_member.top_role.position
-        )
-        if blocked_role_count:
+        higher_live_roles = [
+            role
+            for role in target.roles
+            if not role.is_default()
+            and not role.managed
+            and role.id != bot_member.top_role.id
+            and role.position >= bot_member.top_role.position
+        ]
+        if higher_live_roles:
             warnings.append(
-                f"`{blocked_role_count}` backup roles sit at or above the CLINX role in this server. "
-                "Move CLINX higher or those roles cannot be restored at the right position."
+                f"`{len(higher_live_roles)}` live roles still sit at or above the CLINX role in this server. "
+                "Move CLINX higher or those roles cannot be managed correctly."
+            )
+        available_slots = max(0, bot_member.top_role.position - 1)
+        backup_role_count = len(snapshot.get("roles", []))
+        if backup_role_count > available_slots:
+            blocked_role_count = backup_role_count - available_slots
+            warnings.append(
+                f"`{blocked_role_count}` backup roles would overflow the space below the CLINX role in this server. "
+                "Move CLINX higher or the final role order cannot match the snapshot."
             )
 
     if "load_channels" in selected_actions and not bot_member.guild_permissions.manage_channels:
