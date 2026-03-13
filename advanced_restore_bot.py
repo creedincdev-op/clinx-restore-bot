@@ -496,6 +496,19 @@ def resolve_default_backup_guild_id() -> int | None:
         return None
 
 
+def resolve_notice_channel(guild: discord.Guild) -> discord.abc.Messageable | None:
+    me = guild.me
+    if me is None:
+        return None
+    if guild.system_channel and guild.system_channel.permissions_for(me).send_messages:
+        return guild.system_channel
+    for channel in guild.text_channels:
+        permissions = channel.permissions_for(me)
+        if permissions.send_messages and permissions.view_channel:
+            return channel
+    return None
+
+
 async def apply_snapshot_to_guild(
     snapshot: dict[str, Any],
     target: discord.Guild,
@@ -1041,14 +1054,12 @@ class BackupCreatedCardView(discord.ui.LayoutView):
         backup_id: str,
         source: discord.Guild,
         snapshot: dict[str, Any],
-        warnings: list[str],
     ) -> None:
         super().__init__(timeout=None)
         self.bot_user = bot_user
         self.backup_id = backup_id
         self.source = source
         self.snapshot = snapshot
-        self.warnings = warnings
         self.rebuild()
 
     def rebuild(self) -> None:
@@ -1083,18 +1094,87 @@ class BackupCreatedCardView(discord.ui.LayoutView):
                 "- Server profile payload captured for settings restore"
             ),
         ]
-        if self.warnings:
-            children.extend(
-                [
-                    discord.ui.Separator(),
-                    discord.ui.TextDisplay(
-                        "### Role Hierarchy Warning\n"
-                        + "\n".join(f"- {line}" for line in self.warnings)
-                        + "\n- CLINX cannot move its own role automatically. Raise the CLINX role above protected roles before expecting full role restores."
-                    ),
-                ]
+        self.add_item(discord.ui.Container(*children))
+
+
+class RoleSafetyWarningCardView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        bot_user: discord.ClientUser | None,
+        title: str,
+        subtitle: str,
+        warnings: list[str],
+    ) -> None:
+        super().__init__(timeout=None)
+        self.bot_user = bot_user
+        self.title = title
+        self.subtitle = subtitle
+        self.warnings = warnings
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        self.clear_items()
+        hero = (
+            discord.ui.Thumbnail(self.bot_user.display_avatar.url)
+            if self.bot_user
+            else discord.ui.Button(label="CLINX", disabled=True)
+        )
+        warning_text = "\n".join(f"- {line}" for line in self.warnings)
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.Section(
+                    discord.ui.TextDisplay(f"## ⚠ {self.title}"),
+                    discord.ui.TextDisplay(self.subtitle),
+                    accessory=hero,
+                ),
+                discord.ui.Separator(),
+                discord.ui.Section(
+                    discord.ui.TextDisplay("### What Needs Attention"),
+                    discord.ui.TextDisplay(warning_text),
+                    accessory=discord.ui.Button(label="Warning", style=discord.ButtonStyle.secondary, disabled=True),
+                ),
+                discord.ui.TextDisplay(
+                    "### Fix\n"
+                    "- Move the CLINX role above the roles it must manage.\n"
+                    "- Keep **Manage Roles** enabled if you expect full role backup and load.\n"
+                    "- Discord does not allow CLINX to move its own role automatically."
+                ),
+                accent_color=EMBED_WARN,
             )
-        self.add_item(discord.ui.Container(*children, accent_color=EMBED_ERR if self.warnings else EMBED_OK))
+        )
+
+
+class BackupListCardView(discord.ui.LayoutView):
+    def __init__(self, bot_user: discord.ClientUser | None, entries: list[dict[str, Any]]) -> None:
+        super().__init__(timeout=None)
+        self.bot_user = bot_user
+        self.entries = entries
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        self.clear_items()
+        hero = (
+            discord.ui.Thumbnail(self.bot_user.display_avatar.url)
+            if self.bot_user
+            else discord.ui.Button(label="CLINX", disabled=True)
+        )
+        blocks: list[str] = []
+        for entry in self.entries:
+            blocks.append(
+                f"`{entry['id']}`\n"
+                f"{entry.get('source_guild_name', 'Unknown Source')} · {format_backup_timestamp(entry.get('created_at'))}"
+            )
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.Section(
+                    discord.ui.TextDisplay("## <> Backup Vault"),
+                    discord.ui.TextDisplay("Only the backups owned by your account appear here."),
+                    accessory=hero,
+                ),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay("### Your Backups\n" + "\n\n".join(blocks)),
+            )
+        )
 
 
 class BackupLoadStatusCardView(discord.ui.LayoutView):
@@ -1113,17 +1193,16 @@ class BackupLoadStatusCardView(discord.ui.LayoutView):
         )
         status = self.job.get("status", "unknown")
         badge_map = {
-            "running": ("Live", EMBED_INFO),
-            "completed": ("Completed", EMBED_OK),
-            "cancelled": ("Cancelled", 0x64748B),
-            "failed": ("Failed", EMBED_ERR),
+            "running": ("Live", EMBED_INFO, discord.ButtonStyle.primary),
+            "completed": ("Completed", EMBED_OK, discord.ButtonStyle.success),
+            "cancelled": ("Cancelled", 0x64748B, discord.ButtonStyle.secondary),
+            "failed": ("Failed", EMBED_ERR, discord.ButtonStyle.danger),
         }
-        badge_label, accent = badge_map.get(status, ("Unknown", EMBED_INFO))
+        badge_label, accent, badge_style = badge_map.get(status, ("Unknown", EMBED_INFO, discord.ButtonStyle.secondary))
         route_text = f"`{self.job.get('source_name', 'Unknown')}` -> `{self.job.get('target_name', 'Unknown')}`"
         lane_text = "\n".join(build_backup_lane_lines(set(self.job.get("selected_actions", []))))
         phase_text = self.job.get("phase", "Queued")
         phase_detail = self.job.get("phase_detail", "CLINX is preparing the restore lane.")
-        warning_lines = self.job.get("warnings", [])
         live_stats = self.job.get("stats", {})
 
         if status == "running":
@@ -1198,21 +1277,10 @@ class BackupLoadStatusCardView(discord.ui.LayoutView):
             discord.ui.Section(
                 discord.ui.TextDisplay("### Route"),
                 discord.ui.TextDisplay(route_text),
-                accessory=discord.ui.Button(label=badge_label, style=discord.ButtonStyle.secondary, disabled=True),
+                accessory=discord.ui.Button(label=badge_label, style=badge_style, disabled=True),
             ),
             discord.ui.TextDisplay(f"### Active Lanes\n{lane_text}"),
         ]
-        if warning_lines:
-            children.extend(
-                [
-                    discord.ui.Separator(),
-                    discord.ui.TextDisplay(
-                        "### Guard Rails\n"
-                        + "\n".join(f"- {line}" for line in warning_lines)
-                        + "\n- CLINX cannot move its own role automatically. Raise it before expecting a full role rebuild."
-                    ),
-                ]
-            )
         children.extend(
             [
                 discord.ui.Separator(),
@@ -1220,7 +1288,7 @@ class BackupLoadStatusCardView(discord.ui.LayoutView):
                 discord.ui.TextDisplay(footer_text),
             ]
         )
-        self.add_item(discord.ui.Container(*children, accent_color=accent))
+        self.add_item(discord.ui.Container(*children))
 
 
 async def sync_backup_status_message(guild_id: int) -> None:
@@ -1316,13 +1384,12 @@ class BackupLoadActiveView(discord.ui.LayoutView):
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Route"),
                     discord.ui.TextDisplay(f"`{self.source_name}` -> `{self.target_name}`"),
-                    accessory=discord.ui.Button(label="Live", style=discord.ButtonStyle.secondary, disabled=True),
+                    accessory=discord.ui.Button(label="Live", style=discord.ButtonStyle.primary, disabled=True),
                 ),
                 discord.ui.TextDisplay(f"### Active Lanes\n{active_lanes}"),
                 discord.ui.TextDisplay(f"### Deletes In Flight\n{chr(10).join(delete_lines)}"),
                 discord.ui.TextDisplay(f"### Build In Flight\n{chr(10).join(build_lines)}"),
                 discord.ui.TextDisplay("Use **View Status** for a private snapshot or `/backup status` to re-post the public live card in the current channel."),
-                accent_color=EMBED_INFO,
             )
         )
         self.add_item(discord.ui.ActionRow(self._make_status_button()))
@@ -1418,7 +1485,6 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
 
     def _build_container(self) -> discord.ui.Container:
         preview = build_backup_plan_preview(self.snapshot, self.target, self.selected_actions)
-        target_warnings = build_backup_hierarchy_warnings(self.snapshot, self.target, self.selected_actions)
         hero = (
             discord.ui.Thumbnail(self.bot_user.display_avatar.url)
             if self.bot_user
@@ -1467,18 +1533,6 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
             ),
         ]
 
-        if target_warnings:
-            children.extend(
-                [
-                    discord.ui.Separator(),
-                    discord.ui.TextDisplay(
-                        "### Role / Permission Warning\n"
-                        + "\n".join(f"- {line}" for line in target_warnings)
-                        + "\n- CLINX cannot move its own role automatically. Raise the CLINX role before loading if you want the role stack to match the backup."
-                    ),
-                ]
-            )
-
         if self.review_mode:
             delete_lines = []
             if preview["deleted_roles"]:
@@ -1520,8 +1574,7 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
                 ]
             )
 
-        accent = EMBED_ERR if target_warnings else EMBED_INFO
-        return discord.ui.Container(*children, accent_color=accent)
+        return discord.ui.Container(*children)
 
     def _make_toggle_button(self, action: str) -> discord.ui.Button:
         selected = action in self.selected_actions
@@ -2086,6 +2139,27 @@ async def on_ready() -> None:
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
 
+@bot.event
+async def on_guild_join(guild: discord.Guild) -> None:
+    warnings = build_source_hierarchy_warnings(guild)
+    if not warnings:
+        return
+    channel = resolve_notice_channel(guild)
+    if channel is None:
+        return
+    try:
+        await channel.send(
+            view=RoleSafetyWarningCardView(
+                bot.user,
+                "CLINX Role Setup Needed",
+                "CLINX joined this server, but its role is not positioned safely for full role management.",
+                warnings,
+            )
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        return
+
+
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
     message = str(getattr(error, "original", error))
@@ -2128,10 +2202,19 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
             backup_id,
             source,
             snapshot,
-            source_warnings,
         ),
         ephemeral=True,
     )
+    if source_warnings:
+        await interaction.followup.send(
+            view=RoleSafetyWarningCardView(
+                interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
+                "Source Role Safety Audit",
+                "CLINX detected a hierarchy or permission issue in the source server while building this backup.",
+                source_warnings,
+            ),
+            ephemeral=True,
+        )
 
 
 @backup_group.command(name="load", description="Load backup by ID with action selection")
@@ -2162,6 +2245,17 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
         interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
     )
     await interaction.response.send_message(view=view, ephemeral=True)
+    target_warnings = build_backup_hierarchy_warnings(record["snapshot"], target, set(view.selected_actions))
+    if target_warnings:
+        await interaction.followup.send(
+            view=RoleSafetyWarningCardView(
+                interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
+                "Target Role Safety Audit",
+                "CLINX detected a hierarchy or permission issue in the target server before the restore started.",
+                target_warnings,
+            ),
+            ephemeral=True,
+        )
 
 
 @backup_group.command(name="list", description="List saved backup IDs")
@@ -2173,11 +2267,13 @@ async def backup_list(interaction: discord.Interaction) -> None:
         await interaction.response.send_message(embed=make_embed("Backups", "No backups found.", EMBED_INFO), ephemeral=True)
         return
 
-    lines: list[str] = []
-    for entry in entries:
-        lines.append(f"`{entry['id']}`")
-        lines.append(f"{entry.get('source_guild_name', 'Unknown Source')} - {format_backup_timestamp(entry.get('created_at'))}")
-    await interaction.response.send_message(embed=make_embed("Backups", "\n".join(lines), EMBED_INFO), ephemeral=True)
+    await interaction.response.send_message(
+        view=BackupListCardView(
+            interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
+            entries,
+        ),
+        ephemeral=True,
+    )
 
 
 @backup_group.command(name="delete", description="Delete a backup ID")
