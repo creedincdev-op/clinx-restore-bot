@@ -23,10 +23,10 @@ SUPPORT_URL = "https://discord.gg/V6YEw2Wxcb"
 DATA_DIR = Path(__file__).parent / "data"
 BACKUP_FILE = DATA_DIR / "backups.json"
 
-EMBED_OK = 0x2ECC71
-EMBED_WARN = 0xF1C40F
-EMBED_ERR = 0xE74C3C
-EMBED_INFO = 0x3498DB
+EMBED_OK = 0x22C55E
+EMBED_WARN = 0xF97316
+EMBED_ERR = 0xFF5A76
+EMBED_INFO = 0x5B8CFF
 
 IMPORT_JOBS: dict[int, dict[str, Any]] = {}
 BACKUP_LOAD_JOBS: dict[int, dict[str, Any]] = {}
@@ -183,6 +183,8 @@ def build_backup_load_status_description(job: dict[str, Any]) -> str:
         desc += f"\nRoute: `{job['source_name']}` -> `{job['target_name']}`"
     if job.get("finished_at"):
         desc += f"\nFinished: `{job['finished_at']}`"
+    if job.get("phase"):
+        desc += f"\nPhase: `{job['phase']}`"
     if job.get("stats"):
         stats = job["stats"]
         desc += (
@@ -195,6 +197,8 @@ def build_backup_load_status_description(job: dict[str, Any]) -> str:
             f"\nUpdated channels: `{stats.get('updated_channels', 0)}`"
             f"\nUpdated settings: `{stats.get('updated_settings', 0)}`"
         )
+        if stats.get("blocked_roles"):
+            desc += f"\nBlocked roles: `{stats.get('blocked_roles', 0)}`"
     if job.get("error"):
         desc += f"\nError: `{job['error']}`"
     return desc
@@ -502,6 +506,7 @@ async def apply_snapshot_to_guild(
     load_channels: bool,
     load_settings: bool,
     create_only_missing: bool = False,
+    progress_callback: Any = None,
 ) -> dict[str, int]:
     result = {
         "deleted_roles": 0,
@@ -512,11 +517,17 @@ async def apply_snapshot_to_guild(
         "created_channels": 0,
         "updated_channels": 0,
         "updated_settings": 0,
+        "blocked_roles": 0,
     }
     precreated_categories: dict[str, discord.CategoryChannel] = {}
     precreated_channels: dict[str, discord.abc.GuildChannel] = {}
 
+    async def report(phase: str, detail: str) -> None:
+        if progress_callback is not None:
+            await progress_callback(phase, detail, dict(result))
+
     if delete_channels and not create_only_missing:
+        await report("Wiping Channels", "Removing the live channel tree before rebuild.")
         for channel in list(target.channels):
             try:
                 await channel.delete(reason="CLINX backup load: delete channels")
@@ -529,6 +540,7 @@ async def apply_snapshot_to_guild(
             {} if delete_channels else {category.name: category for category in target.categories}
         )
 
+        await report("Scaffolding Categories", "Creating the category frame before channels start streaming in.")
         for cat_data in snapshot.get("categories", []):
             if cat_data["name"] in structure_category_map:
                 continue
@@ -540,6 +552,7 @@ async def apply_snapshot_to_guild(
             except discord.Forbidden:
                 continue
 
+        await report("Scaffolding Channels", "Creating text and voice channels in the rebuilt category tree.")
         for ch_data in snapshot.get("channels", []):
             if discord.utils.get(target.channels, name=ch_data["name"]) is not None:
                 continue
@@ -569,6 +582,7 @@ async def apply_snapshot_to_guild(
                 continue
 
     if delete_roles and not create_only_missing:
+        await report("Wiping Roles", "Clearing live roles so the backup stack can be rebuilt cleanly.")
         for role in sorted(target.roles, key=lambda r: r.position, reverse=True):
             if role.managed or role.is_default():
                 continue
@@ -576,9 +590,10 @@ async def apply_snapshot_to_guild(
                 await role.delete(reason="CLINX backup load: delete roles")
                 result["deleted_roles"] += 1
             except (discord.Forbidden, discord.HTTPException):
-                pass
+                result["blocked_roles"] += 1
 
     if load_roles and not create_only_missing:
+        await report("Rebuilding Roles", "Creating and updating the role stack from the backup snapshot.")
         existing_roles = {} if delete_roles else {role.name: role for role in target.roles}
         role_order: list[tuple[discord.Role, int]] = []
         for role_data in sorted(snapshot.get("roles", []), key=lambda r: r.get("position", 0)):
@@ -600,7 +615,7 @@ async def apply_snapshot_to_guild(
                     role_order.append((created_role, int(role_data.get("position", created_role.position))))
                     result["created_roles"] += 1
                 except (discord.Forbidden, discord.HTTPException):
-                    pass
+                    result["blocked_roles"] += 1
             else:
                 try:
                     await role.edit(
@@ -613,7 +628,7 @@ async def apply_snapshot_to_guild(
                     role_order.append((role, int(role_data.get("position", role.position))))
                     result["updated_roles"] += 1
                 except (discord.Forbidden, discord.HTTPException):
-                    pass
+                    result["blocked_roles"] += 1
 
         bot_member = target.me
         if role_order and bot_member is not None:
@@ -627,9 +642,10 @@ async def apply_snapshot_to_guild(
                 try:
                     await target.edit_role_positions(position_map)
                 except (discord.Forbidden, discord.HTTPException):
-                    pass
+                    result["blocked_roles"] += len(position_map)
 
     if load_channels:
+        await report("Finalizing Channels", "Binding channel permissions, topics, and structure against the rebuilt role stack.")
         category_map: dict[str, discord.CategoryChannel] = dict(precreated_categories)
         existing_categories = {} if delete_channels else {category.name: category for category in target.categories}
 
@@ -708,6 +724,7 @@ async def apply_snapshot_to_guild(
                 pass
 
     if load_settings and not create_only_missing:
+        await report("Syncing Server Settings", "Applying the saved profile, visuals, and moderation defaults.")
         settings = snapshot.get("settings", {})
         profile_kwargs: dict[str, Any] = {}
         if "name" in settings and settings.get("name"):
@@ -780,6 +797,15 @@ async def run_backup_load_job(
     source_name: str,
     selected_actions: set[str],
 ) -> None:
+    async def report_phase(phase: str, detail: str, stats: dict[str, int]) -> None:
+        job = BACKUP_LOAD_JOBS.get(guild_id)
+        if not job:
+            return
+        job["phase"] = phase
+        job["phase_detail"] = detail
+        job["stats"] = stats
+        await sync_backup_status_message(guild_id)
+
     try:
         stats = await apply_snapshot_to_guild(
             snapshot,
@@ -790,18 +816,28 @@ async def run_backup_load_job(
             load_channels="load_channels" in selected_actions,
             load_settings="load_settings" in selected_actions,
             create_only_missing=False,
+            progress_callback=report_phase,
         )
         BACKUP_LOAD_JOBS[guild_id]["status"] = "completed"
         BACKUP_LOAD_JOBS[guild_id]["finished_at"] = utc_now_iso()
         BACKUP_LOAD_JOBS[guild_id]["stats"] = stats
+        BACKUP_LOAD_JOBS[guild_id]["phase"] = "Completed"
+        BACKUP_LOAD_JOBS[guild_id]["phase_detail"] = "The reviewed restore plan finished applying."
+        await sync_backup_status_message(guild_id)
     except asyncio.CancelledError:
         BACKUP_LOAD_JOBS[guild_id]["status"] = "cancelled"
         BACKUP_LOAD_JOBS[guild_id]["finished_at"] = utc_now_iso()
+        BACKUP_LOAD_JOBS[guild_id]["phase"] = "Cancelled"
+        BACKUP_LOAD_JOBS[guild_id]["phase_detail"] = "The restore task was cancelled before completion."
+        await sync_backup_status_message(guild_id)
         raise
     except Exception as exc:
         BACKUP_LOAD_JOBS[guild_id]["status"] = "failed"
         BACKUP_LOAD_JOBS[guild_id]["finished_at"] = utc_now_iso()
         BACKUP_LOAD_JOBS[guild_id]["error"] = str(exc)
+        BACKUP_LOAD_JOBS[guild_id]["phase"] = "Failed"
+        BACKUP_LOAD_JOBS[guild_id]["phase_detail"] = "CLINX hit an exception while applying the restore plan."
+        await sync_backup_status_message(guild_id)
 
 
 class BackupLoadStatusButton(discord.ui.Button["BackupLoadStatusView"]):
@@ -938,6 +974,284 @@ def build_backup_lane_lines(selected_actions: set[str]) -> list[str]:
     ]
 
 
+def build_backup_hierarchy_warnings(
+    snapshot: dict[str, Any],
+    target: discord.Guild,
+    selected_actions: set[str],
+) -> list[str]:
+    warnings: list[str] = []
+    bot_member = target.me
+    if bot_member is None:
+        warnings.append("CLINX could not resolve its member object in the target server.")
+        return warnings
+
+    if "load_roles" in selected_actions:
+        if not bot_member.guild_permissions.manage_roles:
+            warnings.append("CLINX is missing **Manage Roles** in the target server.")
+        blocked_role_count = sum(
+            1
+            for role in snapshot.get("roles", [])
+            if int(role.get("position", 0)) >= bot_member.top_role.position
+        )
+        if blocked_role_count:
+            warnings.append(
+                f"`{blocked_role_count}` backup roles sit at or above the CLINX role in this server. "
+                "Move CLINX higher or those roles cannot be restored at the right position."
+            )
+
+    if "load_channels" in selected_actions and not bot_member.guild_permissions.manage_channels:
+        warnings.append("CLINX is missing **Manage Channels** in the target server.")
+
+    if "load_settings" in selected_actions and not bot_member.guild_permissions.manage_guild:
+        warnings.append("CLINX is missing **Manage Server** for full settings sync.")
+
+    return warnings
+
+
+def build_source_hierarchy_warnings(guild: discord.Guild) -> list[str]:
+    warnings: list[str] = []
+    bot_member = guild.me
+    if bot_member is None:
+        warnings.append("CLINX could not resolve its member object in the source server.")
+        return warnings
+
+    if not bot_member.guild_permissions.manage_roles:
+        warnings.append("CLINX is missing **Manage Roles** in the source server.")
+
+    higher_roles = [
+        role
+        for role in guild.roles
+        if not role.is_default()
+        and not role.managed
+        and role.id != bot_member.top_role.id
+        and role.position >= bot_member.top_role.position
+    ]
+    if higher_roles:
+        warnings.append(
+            f"`{len(higher_roles)}` source roles sit at or above the CLINX role. "
+            "Move CLINX higher before relying on role backups from this server."
+        )
+    return warnings
+
+
+class BackupCreatedCardView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        bot_user: discord.ClientUser | None,
+        backup_id: str,
+        source: discord.Guild,
+        snapshot: dict[str, Any],
+        warnings: list[str],
+    ) -> None:
+        super().__init__(timeout=None)
+        self.bot_user = bot_user
+        self.backup_id = backup_id
+        self.source = source
+        self.snapshot = snapshot
+        self.warnings = warnings
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        self.clear_items()
+        hero = (
+            discord.ui.Thumbnail(self.bot_user.display_avatar.url)
+            if self.bot_user
+            else discord.ui.Button(label="CLINX", disabled=True)
+        )
+        children: list[discord.ui.Item[Any]] = [
+            discord.ui.Section(
+                discord.ui.TextDisplay("## <> Backup Vault Created"),
+                discord.ui.TextDisplay("Snapshot sealed. This load ID is now ready for private restore use."),
+                accessory=hero,
+            ),
+            discord.ui.Separator(),
+            discord.ui.Section(
+                discord.ui.TextDisplay("### Load ID"),
+                discord.ui.TextDisplay(f"`{self.backup_id}`"),
+                accessory=discord.ui.Button(label="Ready", style=discord.ButtonStyle.success, disabled=True),
+            ),
+            discord.ui.Section(
+                discord.ui.TextDisplay("### Source"),
+                discord.ui.TextDisplay(f"`{self.source.name}` ({self.source.id})"),
+                accessory=discord.ui.Button(label="Private", style=discord.ButtonStyle.secondary, disabled=True),
+            ),
+            discord.ui.TextDisplay(
+                "### Snapshot Inventory\n"
+                f"- `{len(self.snapshot.get('roles', []))}` roles captured\n"
+                f"- `{len(self.snapshot.get('categories', []))}` categories captured\n"
+                f"- `{len(self.snapshot.get('channels', []))}` channels captured\n"
+                "- Server profile payload captured for settings restore"
+            ),
+        ]
+        if self.warnings:
+            children.extend(
+                [
+                    discord.ui.Separator(),
+                    discord.ui.TextDisplay(
+                        "### Role Hierarchy Warning\n"
+                        + "\n".join(f"- {line}" for line in self.warnings)
+                        + "\n- CLINX cannot move its own role automatically. Raise the CLINX role above protected roles before expecting full role restores."
+                    ),
+                ]
+            )
+        self.add_item(discord.ui.Container(*children, accent_color=EMBED_ERR if self.warnings else EMBED_OK))
+
+
+class BackupLoadStatusCardView(discord.ui.LayoutView):
+    def __init__(self, bot_user: discord.ClientUser | None, job: dict[str, Any]) -> None:
+        super().__init__(timeout=None)
+        self.bot_user = bot_user
+        self.job = job
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        self.clear_items()
+        hero = (
+            discord.ui.Thumbnail(self.bot_user.display_avatar.url)
+            if self.bot_user
+            else discord.ui.Button(label="CLINX", disabled=True)
+        )
+        status = self.job.get("status", "unknown")
+        badge_map = {
+            "running": ("Live", EMBED_INFO),
+            "completed": ("Completed", EMBED_OK),
+            "cancelled": ("Cancelled", 0x64748B),
+            "failed": ("Failed", EMBED_ERR),
+        }
+        badge_label, accent = badge_map.get(status, ("Unknown", EMBED_INFO))
+        route_text = f"`{self.job.get('source_name', 'Unknown')}` -> `{self.job.get('target_name', 'Unknown')}`"
+        lane_text = "\n".join(build_backup_lane_lines(set(self.job.get("selected_actions", []))))
+        phase_text = self.job.get("phase", "Queued")
+        phase_detail = self.job.get("phase_detail", "CLINX is preparing the restore lane.")
+        warning_lines = self.job.get("warnings", [])
+        live_stats = self.job.get("stats", {})
+
+        if status == "running":
+            preview = self.job.get("preview", {})
+            state_lines = [f"- **Phase:** {phase_text}", f"- {phase_detail}"]
+            if any(live_stats.values()):
+                if live_stats.get("deleted_roles"):
+                    state_lines.append(f"- `{live_stats['deleted_roles']}` roles deleted so far")
+                if live_stats.get("deleted_channels"):
+                    state_lines.append(f"- `{live_stats['deleted_channels']}` channels deleted so far")
+                if live_stats.get("created_roles"):
+                    state_lines.append(f"- `{live_stats['created_roles']}` roles created so far")
+                if live_stats.get("updated_roles"):
+                    state_lines.append(f"- `{live_stats['updated_roles']}` roles updated so far")
+                if live_stats.get("created_categories"):
+                    state_lines.append(f"- `{live_stats['created_categories']}` categories created so far")
+                if live_stats.get("created_channels"):
+                    state_lines.append(f"- `{live_stats['created_channels']}` channels created so far")
+                if live_stats.get("updated_channels"):
+                    state_lines.append(f"- `{live_stats['updated_channels']}` channels finalized so far")
+                if live_stats.get("updated_settings"):
+                    state_lines.append("- Settings sync has started")
+                if live_stats.get("blocked_roles"):
+                    state_lines.append(f"- `{live_stats['blocked_roles']}` role operations were blocked")
+            else:
+                if preview.get("deleted_roles"):
+                    state_lines.append(f"- `{preview['deleted_roles']}` roles queued for deletion")
+                if preview.get("deleted_channels"):
+                    state_lines.append(f"- `{preview['deleted_channels']}` channels queued for deletion")
+                if preview.get("created_roles"):
+                    state_lines.append(f"- `{preview['created_roles']}` roles queued for creation")
+                if preview.get("created_categories"):
+                    state_lines.append(f"- `{preview['created_categories']}` categories queued for creation")
+                if preview.get("created_channels"):
+                    state_lines.append(f"- `{preview['created_channels']}` channels queued for creation")
+                if preview.get("updated_settings"):
+                    state_lines.append("- Guild settings queued for sync")
+            body_text = "\n".join(state_lines)
+            footer_text = "This card updates automatically in the channel where the load was started."
+        else:
+            result_lines = []
+            if live_stats:
+                for key, label in (
+                    ("deleted_roles", "Deleted roles"),
+                    ("deleted_channels", "Deleted channels"),
+                    ("created_roles", "Created roles"),
+                    ("updated_roles", "Updated roles"),
+                    ("created_categories", "Created categories"),
+                    ("created_channels", "Created channels"),
+                    ("updated_channels", "Updated channels"),
+                    ("updated_settings", "Updated settings"),
+                    ("blocked_roles", "Blocked roles"),
+                ):
+                    if live_stats.get(key):
+                        result_lines.append(f"- `{live_stats[key]}` {label.lower()}")
+            if self.job.get("error"):
+                result_lines.append(f"- Error: `{self.job['error']}`")
+            if not result_lines:
+                result_lines.append("- No result counters available")
+            body_text = "\n".join([f"- **Phase:** {phase_text}", f"- {phase_detail}", *result_lines])
+            footer_text = f"Started `{self.job.get('started_at', 'n/a')}`"
+            if self.job.get("finished_at"):
+                footer_text += f" | Finished `{self.job['finished_at']}`"
+
+        children: list[discord.ui.Item[Any]] = [
+            discord.ui.Section(
+                discord.ui.TextDisplay("## <> Backup Transit"),
+                discord.ui.TextDisplay("Live restore telemetry for the current server load lane."),
+                accessory=hero,
+            ),
+            discord.ui.Separator(),
+            discord.ui.Section(
+                discord.ui.TextDisplay("### Route"),
+                discord.ui.TextDisplay(route_text),
+                accessory=discord.ui.Button(label=badge_label, style=discord.ButtonStyle.secondary, disabled=True),
+            ),
+            discord.ui.TextDisplay(f"### Active Lanes\n{lane_text}"),
+        ]
+        if warning_lines:
+            children.extend(
+                [
+                    discord.ui.Separator(),
+                    discord.ui.TextDisplay(
+                        "### Guard Rails\n"
+                        + "\n".join(f"- {line}" for line in warning_lines)
+                        + "\n- CLINX cannot move its own role automatically. Raise it before expecting a full role rebuild."
+                    ),
+                ]
+            )
+        children.extend(
+            [
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(f"### Live State\n{body_text}"),
+                discord.ui.TextDisplay(footer_text),
+            ]
+        )
+        self.add_item(discord.ui.Container(*children, accent_color=accent))
+
+
+async def sync_backup_status_message(guild_id: int) -> None:
+    job = BACKUP_LOAD_JOBS.get(guild_id)
+    if not job:
+        return
+    channel_id = job.get("status_channel_id")
+    if not channel_id:
+        return
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            return
+    if channel is None or not hasattr(channel, "send"):
+        return
+
+    view = BackupLoadStatusCardView(bot.user, job)
+    message_id = job.get("status_message_id")
+    try:
+        if message_id:
+            message = await channel.fetch_message(message_id)
+            await message.edit(content=None, embed=None, view=view)
+        else:
+            message = await channel.send(view=view)
+            job["status_message_id"] = message.id
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+        return
+
+
 class BackupLoadActiveView(discord.ui.LayoutView):
     def __init__(
         self,
@@ -995,7 +1309,7 @@ class BackupLoadActiveView(discord.ui.LayoutView):
             discord.ui.Container(
                 discord.ui.Section(
                     discord.ui.TextDisplay("## <> Applying Backup"),
-                    discord.ui.TextDisplay("Stage 3 of 3. CLINX is now applying the reviewed recovery plan."),
+                    discord.ui.TextDisplay("Stage 3 of 3. The restore plan is live, and the public status card in this channel will keep updating automatically."),
                     accessory=hero,
                 ),
                 discord.ui.Separator(),
@@ -1007,7 +1321,7 @@ class BackupLoadActiveView(discord.ui.LayoutView):
                 discord.ui.TextDisplay(f"### Active Lanes\n{active_lanes}"),
                 discord.ui.TextDisplay(f"### Deletes In Flight\n{chr(10).join(delete_lines)}"),
                 discord.ui.TextDisplay(f"### Build In Flight\n{chr(10).join(build_lines)}"),
-                discord.ui.TextDisplay("Use **View Status** or `/backup status` for live counters while the restore is running."),
+                discord.ui.TextDisplay("Use **View Status** for a private snapshot or `/backup status` to re-post the public live card in the current channel."),
                 accent_color=EMBED_INFO,
             )
         )
@@ -1104,6 +1418,7 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
 
     def _build_container(self) -> discord.ui.Container:
         preview = build_backup_plan_preview(self.snapshot, self.target, self.selected_actions)
+        target_warnings = build_backup_hierarchy_warnings(self.snapshot, self.target, self.selected_actions)
         hero = (
             discord.ui.Thumbnail(self.bot_user.display_avatar.url)
             if self.bot_user
@@ -1126,9 +1441,9 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
             discord.ui.Section(
                 discord.ui.TextDisplay("## <> Backup Load Planner"),
                 discord.ui.TextDisplay(
-                    "Arm the restore lanes first. CLINX will only show the destructive math after you continue."
+                    "Arm the restore lanes first. CLINX only reveals the destructive math after you continue."
                     if not self.review_mode
-                    else "Review the exact delete and build impact below, then apply the backup."
+                    else "Review the exact delete and build impact, verify the guard rails, then apply the backup."
                 ),
                 accessory=hero,
             ),
@@ -1151,6 +1466,18 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
                 "- Delete-only runs are blocked."
             ),
         ]
+
+        if target_warnings:
+            children.extend(
+                [
+                    discord.ui.Separator(),
+                    discord.ui.TextDisplay(
+                        "### Role / Permission Warning\n"
+                        + "\n".join(f"- {line}" for line in target_warnings)
+                        + "\n- CLINX cannot move its own role automatically. Raise the CLINX role before loading if you want the role stack to match the backup."
+                    ),
+                ]
+            )
 
         if self.review_mode:
             delete_lines = []
@@ -1193,7 +1520,7 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
                 ]
             )
 
-        accent = EMBED_WARN if destructive else (EMBED_WARN if self.review_mode else 0x5B8CFF)
+        accent = EMBED_ERR if target_warnings else EMBED_INFO
         return discord.ui.Container(*children, accent_color=accent)
 
     def _make_toggle_button(self, action: str) -> discord.ui.Button:
@@ -1285,13 +1612,39 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
     async def start_backup_load(self, interaction: discord.Interaction) -> None:
         existing_job = BACKUP_LOAD_JOBS.get(self.target.id)
         if existing_job and existing_job.get("status") == "running":
-            await interaction.response.send_message(
-                embed=make_embed("Backup Busy", "A backup load is already running in this server. Use `/backup status` to check it.", EMBED_WARN, interaction),
-                ephemeral=True,
-            )
+            channel = interaction.channel
+            if channel is not None and hasattr(channel, "send"):
+                existing_job["status_channel_id"] = channel.id
+                existing_job["status_message_id"] = None
+                await interaction.response.send_message(view=BackupLoadStatusCardView(self.bot_user, existing_job), ephemeral=False)
+                message = await interaction.original_response()
+                existing_job["status_message_id"] = message.id
+            else:
+                await interaction.response.send_message(
+                    embed=make_embed("Backup Busy", "A backup load is already running in this server. Use `/backup status` to check it.", EMBED_INFO, interaction),
+                    ephemeral=False,
+                )
             return
 
         preview = build_backup_plan_preview(self.snapshot, self.target, self.selected_actions)
+        warnings = build_backup_hierarchy_warnings(self.snapshot, self.target, self.selected_actions)
+        BACKUP_LOAD_JOBS[self.target.id] = {
+            "status": "running",
+            "started_at": utc_now_iso(),
+            "backup_id": self.backup_id,
+            "source_name": self.source_name,
+            "target_name": self.target.name,
+            "selected_actions": sorted(self.selected_actions),
+            "preview": preview,
+            "phase": "Queued",
+            "phase_detail": "CLINX is opening the restore lane and posting a live status card in this channel.",
+            "stats": {},
+            "warnings": warnings,
+            "status_channel_id": interaction.channel.id if interaction.channel is not None and hasattr(interaction.channel, "send") else None,
+            "status_message_id": None,
+            "task": None,
+        }
+        await sync_backup_status_message(self.target.id)
         task = asyncio.create_task(
             run_backup_load_job(
                 self.target.id,
@@ -1302,16 +1655,7 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
                 selected_actions=set(self.selected_actions),
             )
         )
-        BACKUP_LOAD_JOBS[self.target.id] = {
-            "status": "running",
-            "started_at": utc_now_iso(),
-            "backup_id": self.backup_id,
-            "source_name": self.source_name,
-            "target_name": self.target.name,
-            "selected_actions": sorted(self.selected_actions),
-            "preview": preview,
-            "task": task,
-        }
+        BACKUP_LOAD_JOBS[self.target.id]["task"] = task
         await interaction.response.edit_message(
             view=BackupLoadActiveView(
                 self.bot_user,
@@ -1343,8 +1687,8 @@ COMMAND_LIBRARY_LANES: tuple[CommandLibraryLane, ...] = (
             CommandLibraryEntry("/backup load", "Load a backup with lane selection and live status.", "Opens the restore planner so you can choose what to rebuild before CLINX touches the target server.", "Private", ("/backupload",)),
             CommandLibraryEntry("/backup list", "List only the backups owned by your account.", "Shows your stored backup codes with creation time so only your account can load or delete them.", "Private", ("/backuplist",)),
             CommandLibraryEntry("/backup delete", "Remove a stored backup ID.", "Deletes a backup record from CLINX storage so it can no longer be loaded.", "Private"),
-            CommandLibraryEntry("/backup status", "Inspect the current load job.", "Returns the running state, route, and counters for the active restore job in this server.", "Private"),
-            CommandLibraryEntry("/backup cancel", "Cancel the current backup load.", "Stops the active restore task for this server if one is running.", "Private"),
+            CommandLibraryEntry("/backup status", "Inspect the current load job.", "Posts or refreshes the public live status card for the active restore job in this server.", "Public"),
+            CommandLibraryEntry("/backup cancel", "Cancel the current backup load.", "Stops the active restore task for this server if one is running and updates the public live card.", "Public"),
             CommandLibraryEntry("/backupcreate", "Alias for `/backup create`.", "Shortcut alias for creating a backup without using the group command.", "Private", ("/backup create",)),
             CommandLibraryEntry("/backupload", "Alias for `/backup load`.", "Shortcut alias for opening the restore planner without using the group command.", "Private", ("/backup load",)),
             CommandLibraryEntry("/backuplist", "Alias for `/backup list`.", "Shortcut alias for opening your personal backup list.", "Private", ("/backup list",)),
@@ -1763,6 +2107,8 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
         await interaction.followup.send(embed=make_embed("Error", "Source guild not found.", EMBED_ERR), ephemeral=True)
         return
 
+    snapshot = await build_guild_snapshot(source)
+    source_warnings = build_source_hierarchy_warnings(source)
     store = load_backup_store()
     backup_id = f"BKP-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{secrets.token_hex(3).upper()}"
     store["backups"][backup_id] = {
@@ -1772,15 +2118,17 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
         "created_by_display_name": str(interaction.user),
         "source_guild_id": source.id,
         "source_guild_name": source.name,
-        "snapshot": await build_guild_snapshot(source),
+        "snapshot": snapshot,
     }
     save_backup_store(store)
 
     await interaction.followup.send(
-        embed=make_embed(
-            "Backup Created",
-            f"Load ID: `{backup_id}`\nSource: `{source.name}` ({source.id})",
-            EMBED_OK,
+        view=BackupCreatedCardView(
+            interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
+            backup_id,
+            source,
+            snapshot,
+            source_warnings,
         ),
         ephemeral=True,
     )
@@ -1791,20 +2139,18 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
 @app_commands.autocomplete(load_id=backup_id_autocomplete)
 @app_commands.default_permissions(administrator=True)
 async def backup_load(interaction: discord.Interaction, load_id: str, target_guild_id: int | None = None) -> None:
-    await interaction.response.defer(ephemeral=True, thinking=True)
-
     store = load_backup_store()
     record = store.get("backups", {}).get(load_id)
     if record is None:
-        await interaction.followup.send(embed=make_embed("Invalid Load ID", "No backup found with that ID.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Invalid Load ID", "No backup found with that ID.", EMBED_ERR), ephemeral=True)
         return
     if not can_access_backup(record, interaction.user.id):
-        await interaction.followup.send(embed=make_embed("Access Denied", "That backup does not belong to your account.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Access Denied", "That backup does not belong to your account.", EMBED_ERR), ephemeral=True)
         return
 
     target = interaction.guild if target_guild_id is None else bot.get_guild(target_guild_id)
     if target is None:
-        await interaction.followup.send(embed=make_embed("Error", "Target guild not found.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Error", "Target guild not found.", EMBED_ERR), ephemeral=True)
         return
 
     view = BackupLoadPlannerView(
@@ -1815,7 +2161,7 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
         target,
         interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
     )
-    await interaction.followup.send(view=view, ephemeral=True)
+    await interaction.response.send_message(view=view, ephemeral=True)
 
 
 @backup_group.command(name="list", description="List saved backup IDs")
@@ -1863,13 +2209,17 @@ async def backup_status(interaction: discord.Interaction) -> None:
 
     job = BACKUP_LOAD_JOBS.get(guild.id)
     if not job:
-        await interaction.response.send_message(embed=make_embed("Backup Status", "No backup load job found.", EMBED_INFO), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Backup Status", "No backup load job found.", EMBED_INFO), ephemeral=False)
         return
-
-    await interaction.response.send_message(
-        embed=make_embed("Backup Status", build_backup_load_status_description(job), EMBED_INFO, interaction),
-        ephemeral=True,
-    )
+    channel = interaction.channel
+    if channel is not None and hasattr(channel, "send"):
+        job["status_channel_id"] = channel.id
+        job["status_message_id"] = None
+        await interaction.response.send_message(view=BackupLoadStatusCardView(interaction.client.user if isinstance(interaction.client, commands.Bot) else None, job), ephemeral=False)
+        message = await interaction.original_response()
+        job["status_message_id"] = message.id
+        return
+    await interaction.response.send_message(embed=make_embed("Backup Status", build_backup_load_status_description(job), EMBED_INFO, interaction), ephemeral=False)
 
 
 @backup_group.command(name="cancel", description="Cancel running backup load")
@@ -1882,13 +2232,17 @@ async def backup_cancel(interaction: discord.Interaction) -> None:
 
     job = BACKUP_LOAD_JOBS.get(guild.id)
     if not job or job.get("status") != "running":
-        await interaction.response.send_message(embed=make_embed("Backup", "No running backup load to cancel.", EMBED_INFO), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Backup", "No running backup load to cancel.", EMBED_INFO), ephemeral=False)
         return
 
+    channel = interaction.channel
+    if channel is not None and hasattr(channel, "send"):
+        job["status_channel_id"] = channel.id
+        job["status_message_id"] = None
     task = job.get("task")
     if task:
         task.cancel()
-    await interaction.response.send_message(embed=make_embed("Backup", "Cancel requested.", EMBED_WARN), ephemeral=True)
+    await interaction.response.send_message(embed=make_embed("Backup", "Cancel requested. The public live status card will update when the task stops.", EMBED_INFO), ephemeral=False)
 
 
 @bot.tree.command(name="backupcreate", description="Alias of /backup create")
