@@ -20,6 +20,41 @@ TOKEN = os.getenv("BOT_TOKEN")
 DEFAULT_BACKUP_GUILD_ID = os.getenv("DEFAULT_BACKUP_GUILD_ID")
 SUPPORT_URL = "https://discord.gg/V6YEw2Wxcb"
 DEVELOPER_USER_IDS = {1240237445841420302}
+PREMIUM_PLAN_CATALOG: dict[str, dict[str, Any]] = {
+    "pro": {
+        "display_name": "Pro",
+        "price_label": "INR 99/month",
+        "badge_label": "Pro",
+        "features": (
+            "Backup channels, roles, settings",
+            "Backup threads and forum posts",
+            "Up to 50 backups",
+            "2 auto backups/day",
+        ),
+    },
+    "pro_plus": {
+        "display_name": "Pro Plus",
+        "price_label": "INR 199/month",
+        "badge_label": "Pro Plus",
+        "features": (
+            "Everything in Pro",
+            "Up to 100 backups",
+            "4 auto backups/day",
+            "Priority restore queue",
+        ),
+    },
+    "pro_ultra": {
+        "display_name": "Pro Ultra",
+        "price_label": "INR 349/month",
+        "badge_label": "MAX",
+        "features": (
+            "Everything in Pro Plus",
+            "Up to 250 backups",
+            "8 auto backups/day",
+            "Advanced sync matrix",
+        ),
+    },
+}
 
 DATA_DIR = Path(__file__).parent / "data"
 BACKUP_FILE = DATA_DIR / "backups.json"
@@ -145,11 +180,20 @@ def save_safety_store(store: dict[str, Any]) -> None:
 def get_guild_safety_bucket(store: dict[str, Any], guild_id: int) -> dict[str, Any]:
     guild_key = str(guild_id)
     guilds = store.setdefault("guilds", {})
-    bucket = guilds.setdefault(guild_key, {"trusted_admin_ids": [], "full_access_user_ids": []})
+    bucket = guilds.setdefault(
+        guild_key,
+        {
+            "trusted_admin_ids": [],
+            "full_access_user_ids": [],
+            "premium_entitlement": None,
+        },
+    )
     if not isinstance(bucket.get("trusted_admin_ids"), list):
         bucket["trusted_admin_ids"] = []
     if not isinstance(bucket.get("full_access_user_ids"), list):
         bucket["full_access_user_ids"] = []
+    if bucket.get("premium_entitlement") is not None and not isinstance(bucket.get("premium_entitlement"), dict):
+        bucket["premium_entitlement"] = None
     bucket["trusted_admin_ids"] = sorted({str(user_id) for user_id in bucket["trusted_admin_ids"]})
     bucket["full_access_user_ids"] = sorted({str(user_id) for user_id in bucket["full_access_user_ids"]})
     return bucket
@@ -340,6 +384,50 @@ def has_full_command_access(user_id: int, guild_id: int) -> bool:
     store = load_safety_store()
     bucket = get_guild_safety_bucket(store, guild_id)
     return str(user_id) in bucket.get("full_access_user_ids", [])
+
+
+def get_guild_premium_entitlement(guild_id: int) -> dict[str, Any] | None:
+    store = load_safety_store()
+    bucket = get_guild_safety_bucket(store, guild_id)
+    entitlement = bucket.get("premium_entitlement")
+    return entitlement if isinstance(entitlement, dict) else None
+
+
+def set_guild_premium_entitlement(guild: discord.Guild, gifted_to_user_id: int, gifted_by_user_id: int, plan_key: str) -> dict[str, Any]:
+    store = load_safety_store()
+    bucket = get_guild_safety_bucket(store, guild.id)
+    plan = PREMIUM_PLAN_CATALOG[plan_key]
+    entitlement = {
+        "plan_key": plan_key,
+        "plan_name": plan["display_name"],
+        "gifted_to_user_id": str(gifted_to_user_id),
+        "gifted_by_user_id": str(gifted_by_user_id),
+        "gifted_at": utc_now_iso(),
+        "active": True,
+    }
+    bucket["premium_entitlement"] = entitlement
+    save_safety_store(store)
+    return entitlement
+
+
+def normalize_premium_plan(raw_plan: str | None) -> str | None:
+    token = (raw_plan or "").casefold().strip()
+    token = token.replace(" ", "").replace("-", "").replace("_", "")
+    token = token.replace("premiuim", "premium")
+    token = token.replace("premium(", "").replace(")", "")
+    aliases = {
+        "pro": "pro",
+        "premiumpro": "pro",
+        "plus": "pro_plus",
+        "proplus": "pro_plus",
+        "premiumplus": "pro_plus",
+        "ultra": "pro_ultra",
+        "proultra": "pro_ultra",
+        "premiumultra": "pro_ultra",
+        "max": "pro_ultra",
+        "premiummax": "pro_ultra",
+    }
+    return aliases.get(token)
 
 
 def has_administrator(user: discord.abc.User) -> bool:
@@ -1811,6 +1899,69 @@ class FullAccessRosterCardView(discord.ui.LayoutView):
                     "- This override is developer-managed and not shown in the normal safety owner flow."
                 ),
                 accent_color=self.accent_color,
+            )
+        )
+
+
+class PremiumGiftCardView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        bot_user: discord.ClientUser | None,
+        guild: discord.Guild,
+        *,
+        gifted_member: discord.Member,
+        gifted_by_id: int,
+        entitlement: dict[str, Any],
+    ) -> None:
+        super().__init__(timeout=None)
+        self.bot_user = bot_user
+        self.guild = guild
+        self.gifted_member = gifted_member
+        self.gifted_by_id = gifted_by_id
+        self.entitlement = entitlement
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        self.clear_items()
+        hero = (
+            discord.ui.Thumbnail(self.bot_user.display_avatar.url)
+            if self.bot_user
+            else discord.ui.Button(label="CLINX", disabled=True)
+        )
+        plan = PREMIUM_PLAN_CATALOG[self.entitlement["plan_key"]]
+        feature_lines = "\n".join(f"- {feature}" for feature in plan["features"])
+        gifted_at = format_backup_timestamp(self.entitlement.get("gifted_at"))
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.Section(
+                    discord.ui.TextDisplay("## <> Premium Gift Delivered"),
+                    discord.ui.TextDisplay(
+                        f"{self.gifted_member.mention} just got **{plan['display_name']}** for this server."
+                    ),
+                    accessory=hero,
+                ),
+                discord.ui.Separator(),
+                discord.ui.Section(
+                    discord.ui.TextDisplay("### Gift Payload"),
+                    discord.ui.TextDisplay(
+                        f"Recipient: {self.gifted_member.mention}\n"
+                        f"Plan: `{plan['display_name']}`\n"
+                        f"Value: `{plan['price_label']}`"
+                    ),
+                    accessory=discord.ui.Button(
+                        label=plan["badge_label"],
+                        style=discord.ButtonStyle.primary,
+                        disabled=True,
+                    ),
+                ),
+                discord.ui.TextDisplay(f"### Included\n{feature_lines}"),
+                discord.ui.TextDisplay(
+                    "### Scope\n"
+                    "- Guild premium is now active for CLINX-permitted members in this server.\n"
+                    "- Safety gates and owner approval rules still apply where required.\n"
+                    f"- Gifted by: <@{self.gifted_by_id}> · Activated: `{gifted_at}`"
+                ),
+                accent_color=EMBED_INFO,
             )
         )
 
@@ -4003,6 +4154,22 @@ def revoke_full_access_for_user(guild: discord.Guild, user: discord.Member) -> l
     return bucket["full_access_user_ids"]
 
 
+async def send_temp_prefix_notice(
+    ctx: commands.Context,
+    title: str,
+    description: str,
+    color: int,
+    *,
+    delay_seconds: float = 3.0,
+) -> None:
+    message = await ctx.send(embed=make_embed(title, description, color))
+    await asyncio.sleep(delay_seconds)
+    try:
+        await message.delete()
+    except (discord.Forbidden, discord.HTTPException):
+        return
+
+
 @access_group.command(name="grant", description="Developer only: grant full CLINX command access in this server")
 async def access_grant(interaction: discord.Interaction, user: discord.Member) -> None:
     await handle_access_grant(interaction, user)
@@ -4038,8 +4205,8 @@ async def dev_grant(ctx: commands.Context, member: discord.Member, mode: str | N
         view=FullAccessRosterCardView(
             bot.user,
             ctx.guild,
-            title="Full Access Updated",
-            subtitle=f"{member.mention} now bypasses CLINX runtime command locks in this server.",
+            title="Override Granted",
+            subtitle=f"{member.mention} now has full CLINX operator bypass in this server.",
             user_ids=full_access_ids,
             badge_label="Granted",
             badge_style=discord.ButtonStyle.success,
@@ -4063,8 +4230,8 @@ async def dev_revoke(ctx: commands.Context, member: discord.Member, mode: str | 
         view=FullAccessRosterCardView(
             bot.user,
             ctx.guild,
-            title="Full Access Updated",
-            subtitle=f"{member.mention} no longer bypasses CLINX runtime command locks in this server.",
+            title="Override Revoked",
+            subtitle=f"{member.mention} no longer has full CLINX operator bypass in this server.",
             user_ids=full_access_ids,
             badge_label="Revoked",
             badge_style=discord.ButtonStyle.secondary,
@@ -4168,13 +4335,13 @@ async def dev_kick(ctx: commands.Context, member: discord.Member, *, reason: str
     if not is_developer_user(ctx.author):
         return
     if ctx.guild is None:
-        await ctx.send("Run this in a server.")
+        await send_temp_prefix_notice(ctx, "Kick Failed", "Run this in a server.", EMBED_ERR)
         return
     try:
         await member.kick(reason=reason or f"CLINX developer kick by {ctx.author} ({ctx.author.id})")
-        await ctx.send(f"Kicked {member.mention}.")
+        await send_temp_prefix_notice(ctx, "Kick Executed", f"{member.mention} was kicked by CLINX developer override.", EMBED_OK)
     except (discord.Forbidden, discord.HTTPException):
-        await ctx.send(f"Failed to kick {member.mention}.")
+        await send_temp_prefix_notice(ctx, "Kick Failed", f"CLINX could not kick {member.mention}.", EMBED_ERR)
 
 
 @bot.command(name="ban", hidden=True)
@@ -4182,13 +4349,38 @@ async def dev_ban(ctx: commands.Context, member: discord.Member, *, reason: str 
     if not is_developer_user(ctx.author):
         return
     if ctx.guild is None:
-        await ctx.send("Run this in a server.")
+        await send_temp_prefix_notice(ctx, "Ban Failed", "Run this in a server.", EMBED_ERR)
         return
     try:
         await ctx.guild.ban(member, reason=reason or f"CLINX developer ban by {ctx.author} ({ctx.author.id})")
-        await ctx.send(f"Banned {member.mention}.")
+        await send_temp_prefix_notice(ctx, "Ban Executed", f"{member.mention} was banned by CLINX developer override.", EMBED_OK)
     except (discord.Forbidden, discord.HTTPException):
-        await ctx.send(f"Failed to ban {member.mention}.")
+        await send_temp_prefix_notice(ctx, "Ban Failed", f"CLINX could not ban {member.mention}.", EMBED_ERR)
+
+
+@bot.command(name="gift", hidden=True)
+async def dev_gift(ctx: commands.Context, member: discord.Member, *, plan_text: str | None = None) -> None:
+    if not is_developer_user(ctx.author):
+        return
+    if ctx.guild is None:
+        await ctx.send("Run this in a server.")
+        return
+
+    plan_key = normalize_premium_plan(plan_text)
+    if plan_key is None:
+        await ctx.send("Usage: `^^^gift @user pro`, `^^^gift @user pro plus`, or `^^^gift @user premium(max)`")
+        return
+
+    entitlement = set_guild_premium_entitlement(ctx.guild, member.id, ctx.author.id, plan_key)
+    await ctx.send(
+        view=PremiumGiftCardView(
+            bot.user,
+            ctx.guild,
+            gifted_member=member,
+            gifted_by_id=ctx.author.id,
+            entitlement=entitlement,
+        )
+    )
 
 
 if __name__ == "__main__":
