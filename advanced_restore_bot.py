@@ -20,6 +20,13 @@ TOKEN = os.getenv("BOT_TOKEN")
 DEFAULT_BACKUP_GUILD_ID = os.getenv("DEFAULT_BACKUP_GUILD_ID")
 SUPPORT_URL = "https://discord.gg/V6YEw2Wxcb"
 DEVELOPER_USER_IDS = {1240237445841420302}
+FREE_BACKUP_LIMIT = 7
+PLAN_BACKUP_LIMITS = {
+    "free": FREE_BACKUP_LIMIT,
+    "pro": 50,
+    "pro_plus": 100,
+    "pro_ultra": 250,
+}
 PREMIUM_PLAN_CATALOG: dict[str, dict[str, Any]] = {
     "pro": {
         "display_name": "Pro",
@@ -59,6 +66,15 @@ PREMIUM_PLAN_CATALOG: dict[str, dict[str, Any]] = {
 DATA_DIR = Path(__file__).parent / "data"
 BACKUP_FILE = DATA_DIR / "backups.json"
 SAFETY_FILE = DATA_DIR / "safety.json"
+R2_BACKUP_BUCKET = os.getenv("R2_BACKUP_BUCKET")
+R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID")
+R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL") or (
+    f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com" if R2_ACCOUNT_ID else None
+)
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID") or os.getenv("AWS_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY")
+R2_REGION = os.getenv("R2_REGION", "auto")
+R2_PREFIX = (os.getenv("R2_PREFIX", "clinx-backups") or "clinx-backups").strip("/ ")
 
 EMBED_OK = 0x22C55E
 EMBED_WARN = 0xFACC15
@@ -68,6 +84,7 @@ EMBED_INFO = 0x5B8CFF
 IMPORT_JOBS: dict[int, dict[str, Any]] = {}
 BACKUP_LOAD_JOBS: dict[int, dict[str, Any]] = {}
 PENDING_SAFETY_REQUESTS: dict[int, dict[str, Any]] = {}
+_BACKUP_STORAGE_BACKEND: Any = None
 
 
 def utc_now_iso() -> str:
@@ -216,6 +233,227 @@ def get_user_backup_entries(store: dict[str, Any], user_id: int) -> list[dict[st
     return sorted(entries, key=lambda entry: entry.get("created_at", ""), reverse=True)
 
 
+def strip_backup_snapshot(record: dict[str, Any]) -> dict[str, Any]:
+    metadata = dict(record)
+    metadata.pop("snapshot", None)
+    return metadata
+
+
+def build_backup_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
+    roles = sorted(snapshot.get("roles", []), key=lambda item: item.get("position", 0), reverse=True)
+    categories = sorted(snapshot.get("categories", []), key=lambda item: item.get("position", 0))
+    channels = sorted(
+        snapshot.get("channels", []),
+        key=lambda item: ((item.get("category") or "~"), item.get("position", 0), item.get("name", "")),
+    )
+
+    category_buckets: dict[str | None, list[dict[str, Any]]] = {}
+    for channel in channels:
+        category_buckets.setdefault(channel.get("category"), []).append(channel)
+
+    structure_lines: list[str] = []
+    for category in categories:
+        category_name = str(category.get("name", "unnamed-category"))
+        structure_lines.append(f"[ {category_name} ]")
+        for channel in category_buckets.get(category_name, []):
+            prefix = "#" if channel.get("type") == "text" else "<"
+            structure_lines.append(f"  {prefix} {channel.get('name', 'unnamed-channel')}")
+
+    uncategorized = category_buckets.get(None, [])
+    if uncategorized:
+        structure_lines.append("[ uncategorized ]")
+        for channel in uncategorized:
+            prefix = "#" if channel.get("type") == "text" else "<"
+            structure_lines.append(f"  {prefix} {channel.get('name', 'unnamed-channel')}")
+
+    role_lines = [str(role.get("name", "unnamed-role")) for role in roles]
+    structure_preview = structure_lines[:36]
+    role_preview = role_lines[:36]
+
+    return {
+        "roles_count": len(roles),
+        "categories_count": len(categories),
+        "channels_count": len(channels),
+        "structure_preview": structure_preview,
+        "structure_overflow": max(0, len(structure_lines) - len(structure_preview)),
+        "role_preview": role_preview,
+        "role_overflow": max(0, len(role_lines) - len(role_preview)),
+    }
+
+
+def ensure_backup_summary(record: dict[str, Any]) -> bool:
+    if isinstance(record.get("summary"), dict):
+        return False
+    snapshot = record.get("snapshot")
+    if not isinstance(snapshot, dict):
+        return False
+    record["summary"] = build_backup_summary(snapshot)
+    return True
+
+
+def is_r2_backup_storage_enabled() -> bool:
+    return all([R2_BACKUP_BUCKET, R2_ENDPOINT_URL, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY])
+
+
+class LocalBackupStorageBackend:
+    def list_user_backups(self, user_id: int) -> list[dict[str, Any]]:
+        store = load_backup_store()
+        changed = False
+        entries: list[dict[str, Any]] = []
+        for record in get_user_backup_entries(store, user_id):
+            if ensure_backup_summary(record):
+                changed = True
+            entries.append(strip_backup_snapshot(record))
+        if changed:
+            save_backup_store(store)
+        return entries
+
+    def get_user_backup(self, user_id: int, backup_id: str) -> dict[str, Any] | None:
+        store = load_backup_store()
+        record = store.get("backups", {}).get(backup_id)
+        if record is None or not can_access_backup(record, user_id):
+            return None
+        if ensure_backup_summary(record):
+            save_backup_store(store)
+        return dict(record)
+
+    def save_backup(self, record: dict[str, Any]) -> None:
+        ensure_backup_summary(record)
+        store = load_backup_store()
+        store.setdefault("backups", {})[record["id"]] = record
+        save_backup_store(store)
+
+    def delete_user_backup(self, user_id: int, backup_id: str) -> bool:
+        store = load_backup_store()
+        record = store.get("backups", {}).get(backup_id)
+        if record is None or not can_access_backup(record, user_id):
+            return False
+        del store["backups"][backup_id]
+        save_backup_store(store)
+        return True
+
+
+class R2BackupStorageBackend:
+    def __init__(self) -> None:
+        self._client: Any = None
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            import boto3
+
+            self._client = boto3.client(
+                "s3",
+                endpoint_url=R2_ENDPOINT_URL,
+                aws_access_key_id=R2_ACCESS_KEY_ID,
+                aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+                region_name=R2_REGION,
+            )
+        return self._client
+
+    def _manifest_key(self, user_id: int | str) -> str:
+        return f"{R2_PREFIX}/users/{user_id}/manifest.json"
+
+    def _backup_key(self, user_id: int | str, backup_id: str) -> str:
+        return f"{R2_PREFIX}/users/{user_id}/backups/{backup_id}.json"
+
+    def _read_json(self, key: str, default: Any) -> Any:
+        from botocore.exceptions import ClientError
+
+        client = self._get_client()
+        try:
+            response = client.get_object(Bucket=R2_BACKUP_BUCKET, Key=key)
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code")
+            if error_code in {"NoSuchKey", "404", "NotFound"}:
+                return default
+            raise
+        body = response["Body"].read()
+        return json.loads(body.decode("utf-8"))
+
+    def _write_json(self, key: str, payload: Any) -> None:
+        client = self._get_client()
+        client.put_object(
+            Bucket=R2_BACKUP_BUCKET,
+            Key=key,
+            Body=json.dumps(payload, indent=2).encode("utf-8"),
+            ContentType="application/json",
+        )
+
+    def _delete_key(self, key: str) -> None:
+        client = self._get_client()
+        client.delete_object(Bucket=R2_BACKUP_BUCKET, Key=key)
+
+    def _load_manifest(self, user_id: int) -> dict[str, Any]:
+        manifest = self._read_json(self._manifest_key(user_id), {"user_id": str(user_id), "backups": []})
+        if not isinstance(manifest, dict):
+            return {"user_id": str(user_id), "backups": []}
+        if not isinstance(manifest.get("backups"), list):
+            manifest["backups"] = []
+        manifest["user_id"] = str(user_id)
+        return manifest
+
+    def list_user_backups(self, user_id: int) -> list[dict[str, Any]]:
+        manifest = self._load_manifest(user_id)
+        entries = [entry for entry in manifest.get("backups", []) if isinstance(entry, dict)]
+        return sorted(entries, key=lambda entry: entry.get("created_at", ""), reverse=True)
+
+    def get_user_backup(self, user_id: int, backup_id: str) -> dict[str, Any] | None:
+        manifest_entries = self.list_user_backups(user_id)
+        metadata = next((entry for entry in manifest_entries if entry.get("id") == backup_id), None)
+        if metadata is None:
+            return None
+        record = self._read_json(self._backup_key(user_id, backup_id), None)
+        if not isinstance(record, dict):
+            return None
+        if "summary" not in record and isinstance(metadata.get("summary"), dict):
+            record["summary"] = metadata["summary"]
+        return record
+
+    def save_backup(self, record: dict[str, Any]) -> None:
+        user_id = int(record["created_by_user_id"])
+        ensure_backup_summary(record)
+        manifest = self._load_manifest(user_id)
+        metadata = strip_backup_snapshot(record)
+        manifest["backups"] = [entry for entry in manifest["backups"] if entry.get("id") != record["id"]]
+        manifest["backups"].append(metadata)
+        manifest["backups"] = sorted(manifest["backups"], key=lambda entry: entry.get("created_at", ""), reverse=True)
+        self._write_json(self._backup_key(user_id, record["id"]), record)
+        self._write_json(self._manifest_key(user_id), manifest)
+
+    def delete_user_backup(self, user_id: int, backup_id: str) -> bool:
+        manifest = self._load_manifest(user_id)
+        before = len(manifest["backups"])
+        manifest["backups"] = [entry for entry in manifest["backups"] if entry.get("id") != backup_id]
+        if len(manifest["backups"]) == before:
+            return False
+        self._delete_key(self._backup_key(user_id, backup_id))
+        self._write_json(self._manifest_key(user_id), manifest)
+        return True
+
+
+def get_backup_storage_backend() -> Any:
+    global _BACKUP_STORAGE_BACKEND
+    if _BACKUP_STORAGE_BACKEND is None:
+        _BACKUP_STORAGE_BACKEND = R2BackupStorageBackend() if is_r2_backup_storage_enabled() else LocalBackupStorageBackend()
+    return _BACKUP_STORAGE_BACKEND
+
+
+async def list_user_backup_entries_async(user_id: int) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(get_backup_storage_backend().list_user_backups, user_id)
+
+
+async def get_user_backup_record_async(user_id: int, backup_id: str) -> dict[str, Any] | None:
+    return await asyncio.to_thread(get_backup_storage_backend().get_user_backup, user_id, backup_id)
+
+
+async def save_backup_record_async(record: dict[str, Any]) -> None:
+    await asyncio.to_thread(get_backup_storage_backend().save_backup, record)
+
+
+async def delete_user_backup_async(user_id: int, backup_id: str) -> bool:
+    return await asyncio.to_thread(get_backup_storage_backend().delete_user_backup, user_id, backup_id)
+
+
 def can_access_backup(record: dict[str, Any], user_id: int) -> bool:
     return str(record.get("created_by_user_id", "")) == str(user_id)
 
@@ -319,8 +557,7 @@ async def backup_id_autocomplete(
     interaction: discord.Interaction,
     current: str,
 ) -> list[app_commands.Choice[str]]:
-    store = load_backup_store()
-    entries = get_user_backup_entries(store, interaction.user.id)
+    entries = await list_user_backup_entries_async(interaction.user.id)
     query = current.casefold().strip()
     choices: list[app_commands.Choice[str]] = []
     for record in entries:
@@ -408,6 +645,17 @@ def set_guild_premium_entitlement(guild: discord.Guild, gifted_to_user_id: int, 
     bucket["premium_entitlement"] = entitlement
     save_safety_store(store)
     return entitlement
+
+
+def get_backup_limit_for_guild(guild_id: int) -> tuple[int, str]:
+    entitlement = get_guild_premium_entitlement(guild_id)
+    if not entitlement or not entitlement.get("active"):
+        return PLAN_BACKUP_LIMITS["free"], "Free"
+    plan_key = str(entitlement.get("plan_key", "free"))
+    plan = PREMIUM_PLAN_CATALOG.get(plan_key)
+    if plan is None:
+        return PLAN_BACKUP_LIMITS["free"], "Free"
+    return PLAN_BACKUP_LIMITS.get(plan_key, PLAN_BACKUP_LIMITS["free"]), plan["display_name"]
 
 
 def normalize_premium_plan(raw_plan: str | None) -> str | None:
@@ -1681,12 +1929,176 @@ class RoleSafetyWarningCardView(discord.ui.LayoutView):
         )
 
 
+BACKUP_VAULT_PAGE_SIZE = 10
+
+
+def format_backup_structure_preview(summary: dict[str, Any] | None) -> str:
+    if not isinstance(summary, dict):
+        return "```text\nNo structure preview stored.\n```"
+    lines = list(summary.get("structure_preview", []) or ["No structure preview stored."])
+    overflow = int(summary.get("structure_overflow", 0) or 0)
+    if overflow > 0:
+        lines.append(f"... +{overflow} more")
+    return "```text\n" + "\n".join(lines)[:1500] + "\n```"
+
+
+def format_backup_role_preview(summary: dict[str, Any] | None) -> str:
+    if not isinstance(summary, dict):
+        return "```text\nNo role preview stored.\n```"
+    lines = list(summary.get("role_preview", []) or ["No role preview stored."])
+    overflow = int(summary.get("role_overflow", 0) or 0)
+    if overflow > 0:
+        lines.append(f"... +{overflow} more")
+    return "```text\n" + "\n".join(lines)[:1500] + "\n```"
+
+
+class BackupVaultSelect(discord.ui.Select["BackupListCardView"]):
+    def __init__(self, page_entries: list[dict[str, Any]], selected_backup_id: str | None) -> None:
+        options = [
+            discord.SelectOption(
+                label=entry.get("id", "unknown"),
+                description=f"{entry.get('source_guild_name', 'Unknown Source')} ({format_backup_timestamp(entry.get('created_at'))})"[:100],
+                value=entry.get("id", ""),
+                default=entry.get("id") == selected_backup_id,
+            )
+            for entry in page_entries
+        ]
+        super().__init__(
+            placeholder="Select a backup",
+            options=options,
+            disabled=not options,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.view.selected_backup_id = self.values[0]
+        self.view.rebuild()
+        await interaction.response.edit_message(view=self.view)
+
+
+class BackupVaultPageButton(discord.ui.Button["BackupListCardView"]):
+    def __init__(self, *, label: str, delta: int, disabled: bool) -> None:
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, disabled=disabled)
+        self.delta = delta
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.view.page = max(0, min(self.view.page + self.delta, self.view.max_page_index))
+        page_entries = self.view.current_page_entries
+        if page_entries and self.view.selected_backup_id not in {entry.get("id") for entry in page_entries}:
+            self.view.selected_backup_id = page_entries[0].get("id")
+        self.view.rebuild()
+        await interaction.response.edit_message(view=self.view)
+
+
+class BackupVaultLoadButton(discord.ui.Button["BackupListCardView"]):
+    def __init__(self, disabled: bool) -> None:
+        super().__init__(label="Load this backup", style=discord.ButtonStyle.primary, disabled=disabled)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        selected_entry = self.view.selected_entry
+        if selected_entry is None:
+            await interaction.response.send_message("Select a backup first.", ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("Run this inside the target server.", ephemeral=True)
+            return
+
+        record = await get_user_backup_record_async(self.view.author_id, selected_entry["id"])
+        if record is None:
+            self.view.entries = await list_user_backup_entries_async(self.view.author_id)
+            self.view.selected_backup_id = self.view.entries[0]["id"] if self.view.entries else None
+            self.view.rebuild()
+            await interaction.response.edit_message(view=self.view)
+            return
+
+        planner = BackupLoadPlannerView(
+            self.view.author_id,
+            record["id"],
+            record.get("source_guild_name", "Unknown Source"),
+            record["snapshot"],
+            interaction.guild,
+            self.view.bot_user,
+        )
+        await interaction.response.edit_message(view=planner)
+        target_warnings = build_backup_hierarchy_warnings(record["snapshot"], interaction.guild, set(planner.selected_actions))
+        if target_warnings:
+            await interaction.followup.send(
+                view=RoleSafetyWarningCardView(
+                    self.view.bot_user,
+                    "Target Role Safety Audit",
+                    "CLINX detected a hierarchy or permission issue in the target server before the restore started.",
+                    target_warnings,
+                ),
+                ephemeral=True,
+            )
+
+
+class BackupVaultDeleteButton(discord.ui.Button["BackupListCardView"]):
+    def __init__(self, disabled: bool) -> None:
+        super().__init__(label="Delete this backup", style=discord.ButtonStyle.danger, disabled=disabled)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        selected_entry = self.view.selected_entry
+        if selected_entry is None:
+            await interaction.response.send_message("Select a backup first.", ephemeral=True)
+            return
+
+        deleted = await delete_user_backup_async(self.view.author_id, selected_entry["id"])
+        self.view.entries = await list_user_backup_entries_async(self.view.author_id)
+        self.view.page = min(self.view.page, self.view.max_page_index)
+        self.view.selected_backup_id = self.view.entries[0]["id"] if self.view.entries else None
+        self.view.rebuild()
+        if not deleted:
+            await interaction.response.edit_message(view=self.view)
+            await interaction.followup.send("That backup no longer exists in your vault.", ephemeral=True)
+            return
+        await interaction.response.edit_message(view=self.view)
+
+
 class BackupListCardView(discord.ui.LayoutView):
-    def __init__(self, bot_user: discord.ClientUser | None, entries: list[dict[str, Any]]) -> None:
-        super().__init__(timeout=None)
+    def __init__(
+        self,
+        bot_user: discord.ClientUser | None,
+        *,
+        author_id: int,
+        entries: list[dict[str, Any]],
+        backup_limit: int,
+        plan_label: str,
+    ) -> None:
+        super().__init__(timeout=900)
         self.bot_user = bot_user
+        self.author_id = author_id
         self.entries = entries
+        self.backup_limit = backup_limit
+        self.plan_label = plan_label
+        self.page = 0
+        self.selected_backup_id = entries[0]["id"] if entries else None
         self.rebuild()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the backup owner can use this vault card.", ephemeral=True)
+            return False
+        return True
+
+    @property
+    def max_page_index(self) -> int:
+        return max(0, (len(self.entries) - 1) // BACKUP_VAULT_PAGE_SIZE) if self.entries else 0
+
+    @property
+    def current_page_entries(self) -> list[dict[str, Any]]:
+        start = self.page * BACKUP_VAULT_PAGE_SIZE
+        return self.entries[start : start + BACKUP_VAULT_PAGE_SIZE]
+
+    @property
+    def selected_entry(self) -> dict[str, Any] | None:
+        if not self.entries:
+            return None
+        for entry in self.entries:
+            if entry.get("id") == self.selected_backup_id:
+                return entry
+        fallback = self.entries[0]
+        self.selected_backup_id = fallback.get("id")
+        return fallback
 
     def rebuild(self) -> None:
         self.clear_items()
@@ -1695,40 +2107,90 @@ class BackupListCardView(discord.ui.LayoutView):
             if self.bot_user
             else discord.ui.Button(label="CLINX", disabled=True)
         )
-        newest_entry = self.entries[0] if self.entries else None
-        blocks: list[str] = []
-        for index, entry in enumerate(self.entries, start=1):
-            blocks.append(
-                f"**{index}.** `{entry['id']}`\n"
-                f"- Source: `{entry.get('source_guild_name', 'Unknown Source')}`\n"
-                f"- Created: `{format_backup_timestamp(entry.get('created_at'))}`"
-            )
-        vault_summary = "No private backups are ready yet."
-        top_line = "Private recovery IDs owned by your account are listed here."
-        if newest_entry is not None:
-            vault_summary = (
-                f"Newest ID: `{newest_entry['id']}`\n"
-                f"Latest Source: `{newest_entry.get('source_guild_name', 'Unknown Source')}`"
-            )
-            top_line = (
-                "Private recovery IDs owned by your account are listed here.\n"
-                f"Latest vault route: `{newest_entry.get('source_guild_name', 'Unknown Source')}` -> ready to load."
-            )
-        self.add_item(
-            discord.ui.Container(
+        page_entries = self.current_page_entries
+        selected_entry = self.selected_entry
+        vault_badge = discord.ui.Button(label=self.plan_label, style=discord.ButtonStyle.primary, disabled=True)
+        count_badge = discord.ui.Button(
+            label=f"{len(self.entries)}/{self.backup_limit} slots",
+            style=discord.ButtonStyle.secondary,
+            disabled=True,
+        )
+
+        if selected_entry is None:
+            container = discord.ui.Container(
                 discord.ui.Section(
                     discord.ui.TextDisplay("## <> Backup Vault"),
-                    discord.ui.TextDisplay(f"{top_line}\nUse `/backup load` to open the restore planner."),
+                    discord.ui.TextDisplay("Your private CLINX vault is empty right now. Create a new backup to populate it."),
                     accessory=hero,
                 ),
                 discord.ui.Separator(),
                 discord.ui.Section(
-                    discord.ui.TextDisplay("### Vault Feed"),
-                    discord.ui.TextDisplay(f"`{len(self.entries)}` backup IDs ready for restore\n{vault_summary}"),
-                    accessory=discord.ui.Button(label="Private", style=discord.ButtonStyle.secondary, disabled=True),
+                    discord.ui.TextDisplay("### Vault State"),
+                    discord.ui.TextDisplay(f"`0/{self.backup_limit}` slots used"),
+                    accessory=vault_badge,
                 ),
-                discord.ui.TextDisplay("### Your Backups\n" + "\n\n".join(blocks)),
+                discord.ui.TextDisplay(
+                    "### Next Step\n"
+                    "- Run **`/backup create`** in the server you want to snapshot.\n"
+                    "- CLINX will store that backup under your account only."
+                ),
                 accent_color=EMBED_INFO,
+            )
+            self.add_item(container)
+            return
+
+        summary = selected_entry.get("summary")
+        created_at = format_backup_timestamp(selected_entry.get("created_at"))
+        counts_text = (
+            f"Categories: `{(summary or {}).get('categories_count', 0)}`\n"
+            f"Channels: `{(summary or {}).get('channels_count', 0)}`\n"
+            f"Roles: `{(summary or {}).get('roles_count', 0)}`\n"
+            "Stored Until: `Until deleted`"
+        )
+        container = discord.ui.Container(
+            discord.ui.Section(
+                discord.ui.TextDisplay("## <> Backup Vault"),
+                discord.ui.TextDisplay("Select one of your backups, inspect its saved structure, then load or delete it from the same card."),
+                accessory=hero,
+            ),
+            discord.ui.Separator(),
+            discord.ui.Section(
+                discord.ui.TextDisplay("### Vault Feed"),
+                discord.ui.TextDisplay(
+                    f"`{len(self.entries)}/{self.backup_limit}` private backups stored\n"
+                    f"Current page: `{self.page + 1}` / `{self.max_page_index + 1}`"
+                ),
+                accessory=count_badge,
+            ),
+            discord.ui.Section(
+                discord.ui.TextDisplay(f"### Backup Info - {selected_entry.get('source_guild_name', 'Unknown Source')}"),
+                discord.ui.TextDisplay(
+                    f"ID: `{selected_entry.get('id', 'unknown')}`\n"
+                    f"Created At: `{created_at}`\n"
+                    f"{counts_text}"
+                ),
+                accessory=vault_badge,
+            ),
+            discord.ui.Section(
+                discord.ui.TextDisplay("### Structure Preview"),
+                discord.ui.TextDisplay(format_backup_structure_preview(summary)),
+                accessory=discord.ui.Button(label="Layout", style=discord.ButtonStyle.secondary, disabled=True),
+            ),
+            discord.ui.Section(
+                discord.ui.TextDisplay("### Role Stack"),
+                discord.ui.TextDisplay(format_backup_role_preview(summary)),
+                accessory=discord.ui.Button(label="Roles", style=discord.ButtonStyle.secondary, disabled=True),
+            ),
+            accent_color=EMBED_INFO,
+        )
+        self.add_item(container)
+        self.add_item(discord.ui.ActionRow(BackupVaultSelect(page_entries, self.selected_backup_id)))
+        self.add_item(
+            discord.ui.ActionRow(
+                BackupVaultPageButton(label="Previous Page", delta=-1, disabled=self.page <= 0),
+                BackupVaultPageButton(label="Next Page", delta=1, disabled=self.page >= self.max_page_index),
+                BackupVaultLoadButton(disabled=selected_entry is None),
+                BackupVaultDeleteButton(disabled=selected_entry is None),
             )
         )
 
@@ -3238,20 +3700,39 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
         await interaction.followup.send(embed=make_embed("Error", "Source guild not found.", EMBED_ERR), ephemeral=True)
         return
 
+    if not is_developer_user(interaction.user):
+        existing_entries = await list_user_backup_entries_async(interaction.user.id)
+        backup_limit, plan_label = get_backup_limit_for_guild(source.id)
+        if len(existing_entries) >= backup_limit:
+            await interaction.followup.send(
+                embed=make_embed(
+                    "Backup Limit Reached",
+                    (
+                        f"You already use `{len(existing_entries)}/{backup_limit}` backup slots.\n"
+                        f"Vault tier: `{plan_label}`\n"
+                        "Delete an older backup or activate a higher premium tier before creating another snapshot."
+                    ),
+                    EMBED_WARN,
+                    interaction,
+                ),
+                ephemeral=True,
+            )
+            return
+
     snapshot = await build_guild_snapshot(source)
     source_warnings = build_source_hierarchy_warnings(source)
-    store = load_backup_store()
     backup_id = f"BKP-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{secrets.token_hex(3).upper()}"
-    store["backups"][backup_id] = {
+    record = {
         "id": backup_id,
         "created_at": utc_now_iso(),
         "created_by_user_id": str(interaction.user.id),
         "created_by_display_name": str(interaction.user),
         "source_guild_id": source.id,
         "source_guild_name": source.name,
+        "summary": build_backup_summary(snapshot),
         "snapshot": snapshot,
     }
-    save_backup_store(store)
+    await save_backup_record_async(record)
 
     await interaction.followup.send(
         view=BackupCreatedCardView(
@@ -3283,13 +3764,9 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
     if access_mode == "deny":
         await send_access_denied(interaction, message or "You cannot open the backup planner in this server.")
         return
-    store = load_backup_store()
-    record = store.get("backups", {}).get(load_id)
+    record = await get_user_backup_record_async(interaction.user.id, load_id)
     if record is None:
-        await interaction.response.send_message(embed=make_embed("Invalid Load ID", "No backup found with that ID.", EMBED_ERR), ephemeral=True)
-        return
-    if not can_access_backup(record, interaction.user.id):
-        await interaction.response.send_message(embed=make_embed("Access Denied", "That backup does not belong to your account.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Invalid Load ID", "No backup found with that ID in your vault.", EMBED_ERR), ephemeral=True)
         return
 
     target = interaction.guild if target_guild_id is None else bot.get_guild(target_guild_id)
@@ -3326,16 +3803,23 @@ async def backup_list(interaction: discord.Interaction) -> None:
     if access_mode == "deny":
         await send_access_denied(interaction, message or "You cannot inspect backup ownership in this server.")
         return
-    store = load_backup_store()
-    entries = get_user_backup_entries(store, interaction.user.id)[:20]
+    entries = await list_user_backup_entries_async(interaction.user.id)
     if not entries:
         await interaction.response.send_message(embed=make_embed("Backups", "No backups found.", EMBED_INFO), ephemeral=True)
         return
 
+    guild = interaction.guild
+    backup_limit = FREE_BACKUP_LIMIT
+    plan_label = "Free"
+    if guild is not None:
+        backup_limit, plan_label = get_backup_limit_for_guild(guild.id)
     await interaction.response.send_message(
         view=BackupListCardView(
             interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
-            entries,
+            author_id=interaction.user.id,
+            entries=entries,
+            backup_limit=backup_limit,
+            plan_label=plan_label,
         ),
         ephemeral=True,
     )
@@ -3350,17 +3834,11 @@ async def backup_delete(interaction: discord.Interaction, load_id: str) -> None:
     if access_mode == "deny":
         await send_access_denied(interaction, message or "You cannot delete backups in this server.")
         return
-    store = load_backup_store()
-    record = store.get("backups", {}).get(load_id)
+    record = await get_user_backup_record_async(interaction.user.id, load_id)
     if record is None:
         await interaction.response.send_message(embed=make_embed("Error", "Load ID not found.", EMBED_ERR), ephemeral=True)
         return
-    if not can_access_backup(record, interaction.user.id):
-        await interaction.response.send_message(embed=make_embed("Access Denied", "That backup does not belong to your account.", EMBED_ERR), ephemeral=True)
-        return
-
-    del store["backups"][load_id]
-    save_backup_store(store)
+    await delete_user_backup_async(interaction.user.id, load_id)
     await interaction.response.send_message(embed=make_embed("Deleted", f"Removed `{load_id}`.", EMBED_OK), ephemeral=True)
 
 
