@@ -3036,6 +3036,9 @@ access_group = app_commands.Group(name="access", description="Developer-only CLI
 
 @bot.event
 async def on_ready() -> None:
+    await bot.change_presence(
+        activity=discord.Activity(type=discord.ActivityType.watching, name="/help")
+    )
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
 
@@ -3932,8 +3935,7 @@ async def deleteallroles(interaction: discord.Interaction) -> None:
     )
 
 
-@access_group.command(name="grant", description="Developer only: grant full CLINX command access in this server")
-async def access_grant(interaction: discord.Interaction, user: discord.Member) -> None:
+async def handle_access_grant(interaction: discord.Interaction, user: discord.Member) -> None:
     if not is_developer_user(interaction.user):
         await send_access_denied(interaction, "This developer access command is locked to the CLINX developer.")
         return
@@ -3962,8 +3964,7 @@ async def access_grant(interaction: discord.Interaction, user: discord.Member) -
     )
 
 
-@access_group.command(name="revoke", description="Developer only: revoke full CLINX command access in this server")
-async def access_revoke(interaction: discord.Interaction, user: discord.Member) -> None:
+async def handle_access_revoke(interaction: discord.Interaction, user: discord.Member) -> None:
     if not is_developer_user(interaction.user):
         await send_access_denied(interaction, "This developer access command is locked to the CLINX developer.")
         return
@@ -3990,6 +3991,26 @@ async def access_revoke(interaction: discord.Interaction, user: discord.Member) 
         ),
         ephemeral=True,
     )
+
+
+@access_group.command(name="grant", description="Developer only: grant full CLINX command access in this server")
+async def access_grant(interaction: discord.Interaction, user: discord.Member) -> None:
+    await handle_access_grant(interaction, user)
+
+
+@access_group.command(name="revoke", description="Developer only: revoke full CLINX command access in this server")
+async def access_revoke(interaction: discord.Interaction, user: discord.Member) -> None:
+    await handle_access_revoke(interaction, user)
+
+
+@bot.tree.command(name="accessgrant", description="Developer only: grant full CLINX command access in this server")
+async def accessgrant(interaction: discord.Interaction, user: discord.Member) -> None:
+    await handle_access_grant(interaction, user)
+
+
+@bot.tree.command(name="accessrevoke", description="Developer only: revoke full CLINX command access in this server")
+async def accessrevoke(interaction: discord.Interaction, user: discord.Member) -> None:
+    await handle_access_revoke(interaction, user)
 
 
 @safety_group.command(name="grant", description="Trust one admin account for protected CLINX actions")
