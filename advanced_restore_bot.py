@@ -2287,7 +2287,7 @@ class BackupVaultPageButton(discord.ui.Button["BackupListCardView"]):
         self.view.page = max(0, min(self.view.page + self.delta, self.view.max_page_index))
         page_entries = self.view.current_page_entries
         if page_entries and self.view.selected_backup_id not in {entry.get("id") for entry in page_entries}:
-            self.view.selected_backup_id = page_entries[0].get("id")
+            self.view.selected_backup_id = None
         self.view.rebuild()
         await interaction.response.edit_message(view=self.view)
 
@@ -2308,7 +2308,7 @@ class BackupVaultLoadButton(discord.ui.Button["BackupListCardView"]):
         record = await get_user_backup_record_async(self.view.author_id, selected_entry["id"])
         if record is None:
             self.view.entries = await list_user_backup_entries_async(self.view.author_id)
-            self.view.selected_backup_id = self.view.entries[0]["id"] if self.view.entries else None
+            self.view.selected_backup_id = None
             self.view.rebuild()
             await interaction.response.edit_message(view=self.view)
             return
@@ -2348,7 +2348,7 @@ class BackupVaultDeleteButton(discord.ui.Button["BackupListCardView"]):
         deleted = await delete_user_backup_async(self.view.author_id, selected_entry["id"])
         self.view.entries = await list_user_backup_entries_async(self.view.author_id)
         self.view.page = min(self.view.page, self.view.max_page_index)
-        self.view.selected_backup_id = self.view.entries[0]["id"] if self.view.entries else None
+        self.view.selected_backup_id = None
         self.view.rebuild()
         if not deleted:
             await interaction.response.edit_message(view=self.view)
@@ -2374,7 +2374,7 @@ class BackupListCardView(discord.ui.LayoutView):
         self.backup_limit = backup_limit
         self.plan_label = plan_label
         self.page = 0
-        self.selected_backup_id = entries[0]["id"] if entries else None
+        self.selected_backup_id: str | None = None
         self.rebuild()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -2394,14 +2394,12 @@ class BackupListCardView(discord.ui.LayoutView):
 
     @property
     def selected_entry(self) -> dict[str, Any] | None:
-        if not self.entries:
+        if not self.entries or not self.selected_backup_id:
             return None
         for entry in self.entries:
             if entry.get("id") == self.selected_backup_id:
                 return entry
-        fallback = self.entries[0]
-        self.selected_backup_id = fallback.get("id")
-        return fallback
+        return None
 
     def rebuild(self) -> None:
         self.clear_items()
@@ -2419,7 +2417,7 @@ class BackupListCardView(discord.ui.LayoutView):
             disabled=True,
         )
 
-        if selected_entry is None:
+        if not self.entries:
             container = discord.ui.Container(
                 discord.ui.Section(
                     discord.ui.TextDisplay("## <> Backup Vault"),
@@ -2442,51 +2440,91 @@ class BackupListCardView(discord.ui.LayoutView):
             self.add_item(container)
             return
 
-        summary = selected_entry.get("summary")
-        created_at = format_backup_timestamp(selected_entry.get("created_at"))
-        counts_text = (
-            f"Categories: `{(summary or {}).get('categories_count', 0)}`\n"
-            f"Channels: `{(summary or {}).get('channels_count', 0)}`\n"
-            f"Roles: `{(summary or {}).get('roles_count', 0)}`\n"
-            "Stored Until: `Until deleted`"
-        )
-        container = discord.ui.Container(
-            discord.ui.Section(
-                discord.ui.TextDisplay("## <> Backup Vault"),
-                discord.ui.TextDisplay("Select one of your backups, inspect its saved structure, then load or delete it from the same card."),
-                accessory=hero,
-            ),
-            discord.ui.Separator(),
-            discord.ui.Section(
-                discord.ui.TextDisplay("### Vault Feed"),
-                discord.ui.TextDisplay(
-                    f"`{len(self.entries)}/{self.backup_limit}` private backups stored\n"
-                    f"Current page: `{self.page + 1}` / `{self.max_page_index + 1}`"
+        if selected_entry is None:
+            page_feed: list[str] = []
+            for entry in page_entries:
+                page_feed.extend(
+                    [
+                        f"- `{entry.get('id', 'unknown')}`",
+                        f"  `{entry.get('source_guild_name', 'Unknown Source')}`",
+                        f"  `{format_backup_timestamp(entry.get('created_at'))}`",
+                    ]
+                )
+            container = discord.ui.Container(
+                discord.ui.Section(
+                    discord.ui.TextDisplay("## <> Backup Vault"),
+                    discord.ui.TextDisplay(
+                        "Select one of your backups first. CLINX will open the full structure and role preview only after you choose a vault entry."
+                    ),
+                    accessory=hero,
                 ),
-                accessory=count_badge,
-            ),
-            discord.ui.Section(
-                discord.ui.TextDisplay(f"### Backup Info - {selected_entry.get('source_guild_name', 'Unknown Source')}"),
-                discord.ui.TextDisplay(
-                    f"ID: `{selected_entry.get('id', 'unknown')}`\n"
-                    f"Created At: `{created_at}`\n"
-                    f"{counts_text}"
+                discord.ui.Separator(),
+                discord.ui.Section(
+                    discord.ui.TextDisplay("### Vault Feed"),
+                    discord.ui.TextDisplay(
+                        f"`{len(self.entries)}/{self.backup_limit}` private backups stored\n"
+                        f"Current page: `{self.page + 1}` / `{self.max_page_index + 1}`"
+                    ),
+                    accessory=count_badge,
                 ),
-                accessory=vault_badge,
-            ),
-            discord.ui.Section(
-                discord.ui.TextDisplay("### Structure Preview"),
-                discord.ui.TextDisplay(format_backup_structure_preview(summary)),
-                accessory=discord.ui.Button(label="Layout", style=discord.ButtonStyle.secondary, disabled=True),
-            ),
-            discord.ui.Section(
-                discord.ui.TextDisplay("### Role Stack"),
-                discord.ui.TextDisplay(format_backup_role_preview(summary)),
-                accessory=discord.ui.Button(label="Roles", style=discord.ButtonStyle.secondary, disabled=True),
-            ),
-            accent_color=EMBED_INFO,
-        )
-        self.add_item(container)
+                discord.ui.Section(
+                    discord.ui.TextDisplay("### Selection State"),
+                    discord.ui.TextDisplay("No backup is focused yet. Pick one from the selector below to unlock the full preview."),
+                    accessory=vault_badge,
+                ),
+                discord.ui.TextDisplay(
+                    "### Page Feed\n"
+                    f"{chr(10).join(page_feed[:18]) if page_feed else '- No backups on this page.'}"
+                ),
+                accent_color=EMBED_INFO,
+            )
+            self.add_item(container)
+        else:
+            summary = selected_entry.get("summary")
+            created_at = format_backup_timestamp(selected_entry.get("created_at"))
+            counts_text = (
+                f"Categories: `{(summary or {}).get('categories_count', 0)}`\n"
+                f"Channels: `{(summary or {}).get('channels_count', 0)}`\n"
+                f"Roles: `{(summary or {}).get('roles_count', 0)}`\n"
+                "Stored Until: `Until deleted`"
+            )
+            container = discord.ui.Container(
+                discord.ui.Section(
+                    discord.ui.TextDisplay("## <> Backup Vault"),
+                    discord.ui.TextDisplay("Select one of your backups, inspect its saved structure, then load or delete it from the same card."),
+                    accessory=hero,
+                ),
+                discord.ui.Separator(),
+                discord.ui.Section(
+                    discord.ui.TextDisplay("### Vault Feed"),
+                    discord.ui.TextDisplay(
+                        f"`{len(self.entries)}/{self.backup_limit}` private backups stored\n"
+                        f"Current page: `{self.page + 1}` / `{self.max_page_index + 1}`"
+                    ),
+                    accessory=count_badge,
+                ),
+                discord.ui.Section(
+                    discord.ui.TextDisplay(f"### Backup Info - {selected_entry.get('source_guild_name', 'Unknown Source')}"),
+                    discord.ui.TextDisplay(
+                        f"ID: `{selected_entry.get('id', 'unknown')}`\n"
+                        f"Created At: `{created_at}`\n"
+                        f"{counts_text}"
+                    ),
+                    accessory=vault_badge,
+                ),
+                discord.ui.Section(
+                    discord.ui.TextDisplay("### Structure Preview"),
+                    discord.ui.TextDisplay(format_backup_structure_preview(summary)),
+                    accessory=discord.ui.Button(label="Layout", style=discord.ButtonStyle.secondary, disabled=True),
+                ),
+                discord.ui.Section(
+                    discord.ui.TextDisplay("### Role Stack"),
+                    discord.ui.TextDisplay(format_backup_role_preview(summary)),
+                    accessory=discord.ui.Button(label="Roles", style=discord.ButtonStyle.secondary, disabled=True),
+                ),
+                accent_color=EMBED_INFO,
+            )
+            self.add_item(container)
         self.add_item(discord.ui.ActionRow(BackupVaultSelect(page_entries, self.selected_backup_id)))
         self.add_item(
             discord.ui.ActionRow(
