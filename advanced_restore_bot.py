@@ -204,6 +204,17 @@ def build_progress_bar(percent: int, *, width: int = 12) -> str:
     return f"[{'█' * filled}{'░' * (width - filled)}]"
 
 
+def build_transit_meter(percent: int, *, width: int = 14) -> str:
+    safe_percent = max(0, min(100, percent))
+    filled = round((safe_percent / 100) * width)
+    rail = ["━"] * width
+    for idx in range(filled):
+        rail[idx] = "█"
+    head_index = min(width - 1, max(0, filled - 1 if filled else 0))
+    rail[head_index] = "◉" if safe_percent < 100 else "◆"
+    return f"╭{'─' * width}╮\n│{''.join(rail)}│\n╰{'─' * width}╯"
+
+
 def get_backup_phase_sequence(selected_actions: set[str]) -> list[str]:
     steps = ["Queued"]
     if "delete_channels" in selected_actions:
@@ -227,6 +238,8 @@ def get_backup_progress_state(job: dict[str, Any]) -> tuple[int, str, int, int]:
     phases = get_backup_phase_sequence(selected_actions)
     status = job.get("status")
     current_phase = job.get("phase", "Queued")
+    if status in {"failed", "cancelled"}:
+        current_phase = job.get("last_progress_phase") or job.get("phase") or "Queued"
     if status == "completed":
         index = len(phases) - 1
     else:
@@ -238,7 +251,7 @@ def get_backup_progress_state(job: dict[str, Any]) -> tuple[int, str, int, int]:
     percent = int(round((index / total_stages) * 100))
     if status == "completed":
         percent = 100
-    return percent, build_progress_bar(percent), min(index + 1, len(phases)), len(phases)
+    return percent, build_transit_meter(percent), min(index + 1, len(phases)), len(phases)
 
 
 async def backup_id_autocomplete(
@@ -729,7 +742,10 @@ async def apply_snapshot_to_guild(
 
     async def report(phase: str, detail: str) -> None:
         if progress_callback is not None:
-            await progress_callback(phase, detail, dict(result))
+            try:
+                await progress_callback(phase, detail, dict(result))
+            except Exception:
+                pass
 
     preserved_category_id: int | None = None
     if preserve_channel_id:
@@ -769,7 +785,7 @@ async def apply_snapshot_to_guild(
                 precreated_categories[cat_data["name"]] = created_category
                 structure_category_map[cat_data["name"]] = created_category
                 result["created_categories"] += 1
-            except discord.Forbidden:
+            except (discord.Forbidden, discord.HTTPException, AttributeError):
                 continue
 
         await report("Scaffolding Channels", "Creating text and voice channels in the rebuilt category tree.")
@@ -803,7 +819,7 @@ async def apply_snapshot_to_guild(
                     continue
                 precreated_channels[channel_key] = created_channel
                 result["created_channels"] += 1
-            except (discord.Forbidden, discord.HTTPException):
+            except (discord.Forbidden, discord.HTTPException, AttributeError):
                 continue
 
     if delete_roles and not create_only_missing:
@@ -847,7 +863,7 @@ async def apply_snapshot_to_guild(
                     )
                     role_order.append((created_role, int(role_data.get("position", created_role.position))))
                     result["created_roles"] += 1
-                except (discord.Forbidden, discord.HTTPException):
+                except (discord.Forbidden, discord.HTTPException, AttributeError):
                     result["blocked_roles"] += 1
             else:
                 try:
@@ -860,7 +876,7 @@ async def apply_snapshot_to_guild(
                     )
                     role_order.append((role, int(role_data.get("position", role.position))))
                     result["updated_roles"] += 1
-                except (discord.Forbidden, discord.HTTPException):
+                except (discord.Forbidden, discord.HTTPException, AttributeError):
                     result["blocked_roles"] += 1
 
         bot_member = target.me
@@ -874,7 +890,7 @@ async def apply_snapshot_to_guild(
             if position_map:
                 try:
                     await target.edit_role_positions(position_map)
-                except (discord.Forbidden, discord.HTTPException):
+                except (discord.Forbidden, discord.HTTPException, AttributeError):
                     result["blocked_roles"] += len(position_map)
 
     if load_channels:
@@ -890,12 +906,12 @@ async def apply_snapshot_to_guild(
                 try:
                     existing = await target.create_category(name=cat_data["name"], overwrites=overwrites)
                     result["created_categories"] += 1
-                except discord.Forbidden:
+                except (discord.Forbidden, discord.HTTPException, AttributeError):
                     continue
             elif not create_only_missing:
                 try:
                     await existing.edit(overwrites=overwrites, position=cat_data.get("position", existing.position))
-                except discord.Forbidden:
+                except (discord.Forbidden, discord.HTTPException, AttributeError):
                     pass
 
             category_map[cat_data["name"]] = existing
@@ -927,7 +943,7 @@ async def apply_snapshot_to_guild(
                             overwrites=overwrites,
                         )
                     result["created_channels"] += 1
-                except (discord.Forbidden, discord.HTTPException):
+                except (discord.Forbidden, discord.HTTPException, AttributeError):
                     pass
                 continue
 
@@ -1001,7 +1017,7 @@ async def apply_snapshot_to_guild(
             try:
                 await target.edit(reason="CLINX backup load: update settings", **profile_kwargs)
                 result["updated_settings"] += 1
-            except (discord.Forbidden, discord.HTTPException):
+            except (discord.Forbidden, discord.HTTPException, AttributeError):
                 pass
 
         asset_keys = (
@@ -1016,7 +1032,7 @@ async def apply_snapshot_to_guild(
             try:
                 await target.edit(reason=f"CLINX backup load: update {edit_key}", **{edit_key: decode_asset(settings.get(data_key))})
                 result["updated_settings"] += 1
-            except (discord.Forbidden, discord.HTTPException):
+            except (discord.Forbidden, discord.HTTPException, AttributeError):
                 continue
 
     return result
@@ -1035,6 +1051,7 @@ async def run_backup_load_job(
         job = BACKUP_LOAD_JOBS.get(guild_id)
         if not job:
             return
+        job["last_progress_phase"] = phase
         job["phase"] = phase
         job["phase_detail"] = detail
         job["stats"] = stats
@@ -1726,6 +1743,7 @@ async def send_access_denied(interaction: discord.Interaction, message: str) -> 
 
 
 async def resolve_backup_status_channel(guild_id: int, job: dict[str, Any]) -> discord.abc.Messageable | None:
+    restore_channel_name = "clinx-restoring"
     channel_id = job.get("status_channel_id")
     channel = bot.get_channel(channel_id) if channel_id else None
     if channel is None and channel_id:
@@ -1734,6 +1752,8 @@ async def resolve_backup_status_channel(guild_id: int, job: dict[str, Any]) -> d
         except (discord.Forbidden, discord.NotFound, discord.HTTPException):
             channel = None
     if channel is not None and hasattr(channel, "send"):
+        channel_name = getattr(channel, "name", restore_channel_name)
+        job["status_channel_name"] = channel_name
         return channel
 
     guild = bot.get_guild(guild_id)
@@ -1741,19 +1761,21 @@ async def resolve_backup_status_channel(guild_id: int, job: dict[str, Any]) -> d
         return None
     me = guild.me or guild.get_member(bot.user.id)
 
-    restoring = discord.utils.get(guild.text_channels, name="restoring")
+    restoring = discord.utils.get(guild.text_channels, name=restore_channel_name)
     if restoring is not None and me is not None:
         permissions = restoring.permissions_for(me)
         if permissions.view_channel and permissions.send_messages:
             job["status_channel_id"] = restoring.id
             job["status_message_id"] = None
+            job["status_channel_name"] = restoring.name
             return restoring
 
     if me is not None and me.guild_permissions.manage_channels:
         try:
-            restoring = await guild.create_text_channel("restoring", reason="CLINX backup load: restore status fallback channel")
+            restoring = await guild.create_text_channel(restore_channel_name, reason="CLINX backup load: restore status fallback channel")
             job["status_channel_id"] = restoring.id
             job["status_message_id"] = None
+            job["status_channel_name"] = restoring.name
             return restoring
         except (discord.Forbidden, discord.HTTPException):
             pass
@@ -1764,6 +1786,7 @@ async def resolve_backup_status_channel(guild_id: int, job: dict[str, Any]) -> d
         if fallback_id is not None:
             job["status_channel_id"] = fallback_id
             job["status_message_id"] = None
+        job["status_channel_name"] = getattr(fallback, "name", restore_channel_name)
         return fallback
     return None
 
@@ -1861,9 +1884,10 @@ class BackupLoadStatusCardView(discord.ui.LayoutView):
 
         transit_summary = (
             f"### Transit Progress\n"
-            f"`{progress_bar}` `{progress_percent}%`\n"
-            f"Stage `{stage_index}` of `{stage_total}`"
+            f"```text\n{progress_bar}\n```\n"
+            f"`{progress_percent}%` locked · Stage `{stage_index}` of `{stage_total}`"
         )
+        status_channel_name = self.job.get("status_channel_name", "clinx-restoring")
         children: list[discord.ui.Item[Any]] = [
             discord.ui.Section(
                 discord.ui.TextDisplay("## <> Backup Transit"),
@@ -1882,6 +1906,7 @@ class BackupLoadStatusCardView(discord.ui.LayoutView):
                 accessory=discord.ui.Button(label=f"{progress_percent}%", style=discord.ButtonStyle.primary, disabled=True),
             ),
             discord.ui.TextDisplay(transit_summary),
+            discord.ui.TextDisplay(f"### Transit Channel\n`#{status_channel_name}`"),
             discord.ui.TextDisplay(f"### Active Lanes\n{lane_text}"),
         ]
         children.extend(
@@ -1979,7 +2004,7 @@ class BackupLoadActiveView(discord.ui.LayoutView):
             discord.ui.Container(
                 discord.ui.Section(
                     discord.ui.TextDisplay("## <> Applying Backup"),
-                    discord.ui.TextDisplay("Stage 3 of 3. The restore plan is live. CLINX keeps the public transit card updating in the active restore channel."),
+                    discord.ui.TextDisplay("Stage 3 of 3. The restore plan is live. CLINX pushes the public transit feed into `#clinx-restoring` and keeps it updated automatically."),
                     accessory=hero,
                 ),
                 discord.ui.Separator(),
@@ -1991,7 +2016,7 @@ class BackupLoadActiveView(discord.ui.LayoutView):
                 discord.ui.TextDisplay(f"### Active Lanes\n{active_lanes}"),
                 discord.ui.TextDisplay(f"### Deletes In Flight\n{chr(10).join(delete_lines)}"),
                 discord.ui.TextDisplay(f"### Build In Flight\n{chr(10).join(build_lines)}"),
-                discord.ui.TextDisplay("Use **View Status** for a private snapshot or `/backup status` to re-post the public transit card. If the original channel is rebuilt, CLINX falls back to `#restoring`."),
+                discord.ui.TextDisplay("Use **View Status** for a private snapshot or `/backup status` to re-post the public transit card. CLINX uses `#clinx-restoring` as the restore status lane."),
             )
         )
         self.add_item(discord.ui.ActionRow(self._make_status_button()))
@@ -2298,18 +2323,17 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
     async def start_backup_load(self, interaction: discord.Interaction) -> None:
         existing_job = BACKUP_LOAD_JOBS.get(self.target.id)
         if existing_job and existing_job.get("status") == "running":
-            channel = interaction.channel
-            if channel is not None and hasattr(channel, "send"):
-                existing_job["status_channel_id"] = channel.id
-                existing_job["status_message_id"] = None
-                await interaction.response.send_message(view=BackupLoadStatusCardView(self.bot_user, existing_job), ephemeral=False)
-                message = await interaction.original_response()
-                existing_job["status_message_id"] = message.id
-            else:
-                await interaction.response.send_message(
-                    embed=make_embed("Backup Busy", "A backup load is already running in this server. Use `/backup status` to check it.", EMBED_INFO, interaction),
-                    ephemeral=False,
-                )
+            await sync_backup_status_message(self.target.id)
+            channel_name = existing_job.get("status_channel_name", "clinx-restoring")
+            await interaction.response.send_message(
+                embed=make_embed(
+                    "Backup Busy",
+                    f"A backup load is already running in this server. CLINX is streaming the live transit feed in `#{channel_name}`.",
+                    EMBED_INFO,
+                    interaction,
+                ),
+                ephemeral=True,
+            )
             return
 
         preview = build_backup_plan_preview(self.snapshot, self.target, self.selected_actions)
@@ -2337,16 +2361,18 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
                     "selected_actions": sorted(self.selected_actions),
                     "preview": preview,
                     "phase": "Queued",
-                    "phase_detail": "Owner approval completed. CLINX is opening the restore lane.",
+                    "phase_detail": "Owner approval completed. CLINX is opening the restore lane and priming the transit feed.",
                     "stats": {},
                     "warnings": warnings,
-                    "status_channel_id": request["channel_id"],
+                    "status_channel_id": None,
                     "status_message_id": None,
-                    "preserve_channel_id": request.get("preserve_channel_id"),
+                    "status_channel_name": "clinx-restoring",
+                    "preserve_channel_id": None,
                     "task": None,
                     "approval_request_id": request["id"],
                 }
                 await sync_backup_status_message(self.target.id)
+                BACKUP_LOAD_JOBS[self.target.id]["preserve_channel_id"] = BACKUP_LOAD_JOBS[self.target.id].get("status_channel_id")
                 task = asyncio.create_task(
                     run_backup_load_job(
                         self.target.id,
@@ -2385,16 +2411,18 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
             "selected_actions": sorted(self.selected_actions),
             "preview": preview,
             "phase": "Queued",
-            "phase_detail": "CLINX is opening the restore lane and posting a live status card in this channel.",
+            "phase_detail": "CLINX is opening the restore lane and priming the public transit feed.",
             "stats": {},
             "warnings": warnings,
-            "status_channel_id": interaction.channel.id if interaction.channel is not None and hasattr(interaction.channel, "send") else None,
+            "status_channel_id": None,
             "status_message_id": None,
-            "preserve_channel_id": interaction.channel.id if isinstance(interaction.channel, discord.TextChannel) else None,
+            "status_channel_name": "clinx-restoring",
+            "preserve_channel_id": None,
             "task": None,
             "approval_request_id": None,
         }
         await sync_backup_status_message(self.target.id)
+        BACKUP_LOAD_JOBS[self.target.id]["preserve_channel_id"] = BACKUP_LOAD_JOBS[self.target.id].get("status_channel_id")
         task = asyncio.create_task(
             run_backup_load_job(
                 self.target.id,
@@ -2890,15 +2918,17 @@ async def backup_status(interaction: discord.Interaction) -> None:
     if not job:
         await interaction.response.send_message(embed=make_embed("Backup Status", "No backup load job found.", EMBED_INFO), ephemeral=False)
         return
-    channel = interaction.channel
-    if channel is not None and hasattr(channel, "send"):
-        job["status_channel_id"] = channel.id
-        job["status_message_id"] = None
-        await interaction.response.send_message(view=BackupLoadStatusCardView(interaction.client.user if isinstance(interaction.client, commands.Bot) else None, job), ephemeral=False)
-        message = await interaction.original_response()
-        job["status_message_id"] = message.id
-        return
-    await interaction.response.send_message(embed=make_embed("Backup Status", build_backup_load_status_description(job), EMBED_INFO, interaction), ephemeral=False)
+    await sync_backup_status_message(guild.id)
+    channel_name = job.get("status_channel_name", "clinx-restoring")
+    await interaction.response.send_message(
+        embed=make_embed(
+            "Backup Status",
+            f"CLINX refreshed the live transit card in `#{channel_name}`.\nUse **View Status** if you only need the private snapshot.",
+            EMBED_INFO,
+            interaction,
+        ),
+        ephemeral=True,
+    )
 
 
 @backup_group.command(name="cancel", description="Cancel running backup load")
