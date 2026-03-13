@@ -1437,6 +1437,68 @@ class BackupListCardView(discord.ui.LayoutView):
         )
 
 
+class SafetyRosterCardView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        bot_user: discord.ClientUser | None,
+        guild: discord.Guild,
+        *,
+        title: str,
+        subtitle: str,
+        trusted_ids: list[str],
+        badge_label: str,
+        badge_style: discord.ButtonStyle,
+        accent_color: int,
+    ) -> None:
+        super().__init__(timeout=None)
+        self.bot_user = bot_user
+        self.guild = guild
+        self.title = title
+        self.subtitle = subtitle
+        self.trusted_ids = trusted_ids
+        self.badge_label = badge_label
+        self.badge_style = badge_style
+        self.accent_color = accent_color
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        self.clear_items()
+        hero = (
+            discord.ui.Thumbnail(self.bot_user.display_avatar.url)
+            if self.bot_user
+            else discord.ui.Button(label="CLINX", disabled=True)
+        )
+        roster_lines: list[str] = []
+        for index, user_id in enumerate(self.trusted_ids, start=1):
+            member = self.guild.get_member(int(user_id))
+            roster_lines.append(f"**{index}.** {member.mention if member else f'`{user_id}`'}")
+        if not roster_lines:
+            roster_lines.append("- No trusted CLINX admins are configured in this server.")
+
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.Section(
+                    discord.ui.TextDisplay(f"## <> {self.title}"),
+                    discord.ui.TextDisplay(self.subtitle),
+                    accessory=hero,
+                ),
+                discord.ui.Separator(),
+                discord.ui.Section(
+                    discord.ui.TextDisplay("### Trust State"),
+                    discord.ui.TextDisplay(f"`{len(self.trusted_ids)}` trusted admin slot(s) configured"),
+                    accessory=discord.ui.Button(label=self.badge_label, style=self.badge_style, disabled=True),
+                ),
+                discord.ui.TextDisplay("### Trusted Admins\n" + "\n".join(roster_lines)),
+                discord.ui.TextDisplay(
+                    "### Scope\n"
+                    "- Trusted admins bypass owner approval for Tier 2 and Tier 3 CLINX actions.\n"
+                    "- `/leave` and `/safety` commands stay locked to the actual server owner."
+                ),
+                accent_color=self.accent_color,
+            )
+        )
+
+
 class SafetyApprovalCardView(discord.ui.LayoutView):
     def __init__(self, bot_user: discord.ClientUser | None, request: dict[str, Any]) -> None:
         super().__init__(timeout=None)
@@ -3536,7 +3598,19 @@ async def safety_grant(interaction: discord.Interaction, user: discord.Member) -
     trusted_ids.add(str(user.id))
     bucket["trusted_admin_ids"] = sorted(trusted_ids)
     save_safety_store(store)
-    await interaction.response.send_message(embed=make_embed("Safety", f"{user.mention} is now a trusted CLINX admin in this server.", EMBED_OK), ephemeral=True)
+    await interaction.response.send_message(
+        view=SafetyRosterCardView(
+            interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
+            interaction.guild,
+            title="Safety Trust Updated",
+            subtitle=f"{user.mention} is now a trusted CLINX admin in this server.",
+            trusted_ids=bucket["trusted_admin_ids"],
+            badge_label="Granted",
+            badge_style=discord.ButtonStyle.success,
+            accent_color=EMBED_OK,
+        ),
+        ephemeral=True,
+    )
 
 
 @safety_group.command(name="revoke", description="Remove CLINX trust from an admin account")
@@ -3555,7 +3629,19 @@ async def safety_revoke(interaction: discord.Interaction, user: discord.Member) 
     trusted_ids.discard(str(user.id))
     bucket["trusted_admin_ids"] = sorted(trusted_ids)
     save_safety_store(store)
-    await interaction.response.send_message(embed=make_embed("Safety", f"{user.mention} is no longer a trusted CLINX admin in this server.", EMBED_WARN), ephemeral=True)
+    await interaction.response.send_message(
+        view=SafetyRosterCardView(
+            interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
+            interaction.guild,
+            title="Safety Trust Updated",
+            subtitle=f"{user.mention} is no longer a trusted CLINX admin in this server.",
+            trusted_ids=bucket["trusted_admin_ids"],
+            badge_label="Revoked",
+            badge_style=discord.ButtonStyle.secondary,
+            accent_color=EMBED_WARN,
+        ),
+        ephemeral=True,
+    )
 
 
 @safety_group.command(name="list", description="List trusted CLINX admins for this server")
@@ -3571,14 +3657,19 @@ async def safety_list(interaction: discord.Interaction) -> None:
     store = load_safety_store()
     bucket = get_guild_safety_bucket(store, interaction.guild.id)
     trusted_ids = bucket.get("trusted_admin_ids", [])
-    if not trusted_ids:
-        await interaction.response.send_message(embed=make_embed("Safety", "No trusted CLINX admins are configured for this server.", EMBED_INFO), ephemeral=True)
-        return
-    lines = []
-    for user_id in trusted_ids:
-        member = interaction.guild.get_member(int(user_id))
-        lines.append(member.mention if member else f"`{user_id}`")
-    await interaction.response.send_message(embed=make_embed("Safety", "\n".join(lines), EMBED_INFO), ephemeral=True)
+    await interaction.response.send_message(
+        view=SafetyRosterCardView(
+            interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
+            interaction.guild,
+            title="Safety Trust Roster",
+            subtitle="These admins can bypass owner approval for protected CLINX actions in this server.",
+            trusted_ids=trusted_ids,
+            badge_label="Owner Only",
+            badge_style=discord.ButtonStyle.primary,
+            accent_color=EMBED_INFO,
+        ),
+        ephemeral=True,
+    )
 
 
 if __name__ == "__main__":
