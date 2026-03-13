@@ -145,10 +145,13 @@ def save_safety_store(store: dict[str, Any]) -> None:
 def get_guild_safety_bucket(store: dict[str, Any], guild_id: int) -> dict[str, Any]:
     guild_key = str(guild_id)
     guilds = store.setdefault("guilds", {})
-    bucket = guilds.setdefault(guild_key, {"trusted_admin_ids": []})
+    bucket = guilds.setdefault(guild_key, {"trusted_admin_ids": [], "full_access_user_ids": []})
     if not isinstance(bucket.get("trusted_admin_ids"), list):
         bucket["trusted_admin_ids"] = []
+    if not isinstance(bucket.get("full_access_user_ids"), list):
+        bucket["full_access_user_ids"] = []
     bucket["trusted_admin_ids"] = sorted({str(user_id) for user_id in bucket["trusted_admin_ids"]})
+    bucket["full_access_user_ids"] = sorted({str(user_id) for user_id in bucket["full_access_user_ids"]})
     return bucket
 
 
@@ -333,6 +336,12 @@ def is_trusted_admin(user_id: int, guild_id: int) -> bool:
     return str(user_id) in bucket.get("trusted_admin_ids", [])
 
 
+def has_full_command_access(user_id: int, guild_id: int) -> bool:
+    store = load_safety_store()
+    bucket = get_guild_safety_bucket(store, guild_id)
+    return str(user_id) in bucket.get("full_access_user_ids", [])
+
+
 def has_administrator(user: discord.abc.User) -> bool:
     return isinstance(user, discord.Member) and user.guild_permissions.administrator
 
@@ -385,7 +394,11 @@ def require_clinx_access(
         return "direct", tier, None
     if guild is None:
         return "deny", tier, "This command must be used inside a server."
+    if is_developer_user(interaction.user):
+        return "direct", tier, None
     if is_guild_owner(interaction.user, guild):
+        return "direct", tier, None
+    if has_full_command_access(interaction.user.id, guild.id):
         return "direct", tier, None
     if tier == 4:
         return "deny", tier, "Only the actual server owner can use this command."
@@ -1698,6 +1711,68 @@ class SafetyRosterCardView(discord.ui.LayoutView):
         )
 
 
+class FullAccessRosterCardView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        bot_user: discord.ClientUser | None,
+        guild: discord.Guild,
+        *,
+        title: str,
+        subtitle: str,
+        user_ids: list[str],
+        badge_label: str,
+        badge_style: discord.ButtonStyle,
+        accent_color: int,
+    ) -> None:
+        super().__init__(timeout=None)
+        self.bot_user = bot_user
+        self.guild = guild
+        self.title = title
+        self.subtitle = subtitle
+        self.user_ids = user_ids
+        self.badge_label = badge_label
+        self.badge_style = badge_style
+        self.accent_color = accent_color
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        self.clear_items()
+        hero = (
+            discord.ui.Thumbnail(self.bot_user.display_avatar.url)
+            if self.bot_user
+            else discord.ui.Button(label="CLINX", disabled=True)
+        )
+        roster_lines: list[str] = []
+        for index, user_id in enumerate(self.user_ids, start=1):
+            member = self.guild.get_member(int(user_id))
+            roster_lines.append(f"**{index}.** {member.mention if member else f'`{user_id}`'}")
+        if not roster_lines:
+            roster_lines.append("- No full-access overrides are configured in this server.")
+
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.Section(
+                    discord.ui.TextDisplay(f"## <> {self.title}"),
+                    discord.ui.TextDisplay(self.subtitle),
+                    accessory=hero,
+                ),
+                discord.ui.Separator(),
+                discord.ui.Section(
+                    discord.ui.TextDisplay("### Override State"),
+                    discord.ui.TextDisplay(f"`{len(self.user_ids)}` full-access override(s) configured"),
+                    accessory=discord.ui.Button(label=self.badge_label, style=self.badge_style, disabled=True),
+                ),
+                discord.ui.TextDisplay("### Full Access Users\n" + "\n".join(roster_lines)),
+                discord.ui.TextDisplay(
+                    "### Scope\n"
+                    "- These users bypass CLINX runtime command gates in this server.\n"
+                    "- This override is developer-managed and not shown in the normal safety owner flow."
+                ),
+                accent_color=self.accent_color,
+            )
+        )
+
+
 class SafetyApprovalCardView(discord.ui.LayoutView):
     def __init__(self, bot_user: discord.ClientUser | None, request: dict[str, Any]) -> None:
         super().__init__(timeout=None)
@@ -2261,6 +2336,7 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
         self.snapshot = snapshot
         self.target = target
         self.bot_user = bot_user
+        self.author_is_developer = author_id in DEVELOPER_USER_IDS
         self.selected_actions: set[str] = {"load_roles", "load_channels", "load_settings", "delete_roles", "delete_channels"}
         self.review_mode = False
         self.detail_mode = False
@@ -2273,6 +2349,8 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
         return True
 
     def normalize_actions(self) -> None:
+        if self.author_is_developer:
+            return
         if "load_roles" not in self.selected_actions or "load_channels" not in self.selected_actions:
             self.selected_actions.discard("delete_roles")
             self.selected_actions.discard("delete_channels")
@@ -2420,6 +2498,8 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
         selected = action in self.selected_actions
         destructive = action.startswith("delete_")
         enabled = not (
+            not self.author_is_developer
+            and
             action in {"delete_roles", "delete_channels"}
             and ("load_roles" not in self.selected_actions or "load_channels" not in self.selected_actions)
         )
@@ -2459,6 +2539,8 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
 
     def _make_continue_button(self) -> discord.ui.Button:
         has_rebuild_lane = any(action in self.selected_actions for action in ("load_roles", "load_channels", "load_settings"))
+        if self.author_is_developer:
+            has_rebuild_lane = bool(self.selected_actions)
         button = discord.ui.Button(label="Continue", style=discord.ButtonStyle.primary, disabled=not has_rebuild_lane)
 
         async def callback(interaction: discord.Interaction) -> None:
@@ -2891,6 +2973,7 @@ class ClinxBot(commands.Bot):
             self.tree.add_command(export_group)
             self.tree.add_command(import_group)
             self.tree.add_command(safety_group)
+            self.tree.add_command(access_group)
             self._groups_added = True
 
         if not self._startup_synced:
@@ -2905,6 +2988,7 @@ backup_group = app_commands.Group(name="backup", description="Backup and restore
 export_group = app_commands.Group(name="export", description="Export server objects")
 import_group = app_commands.Group(name="import", description="Import server objects")
 safety_group = app_commands.Group(name="safety", description="CLINX trust and approval controls")
+access_group = app_commands.Group(name="access", description="Developer-only CLINX access controls")
 
 
 @bot.event
@@ -3794,6 +3878,66 @@ async def deleteallroles(interaction: discord.Interaction) -> None:
     )
 
 
+@access_group.command(name="grant", description="Developer only: grant full CLINX command access in this server")
+async def access_grant(interaction: discord.Interaction, user: discord.Member) -> None:
+    if not is_developer_user(interaction.user):
+        await send_access_denied(interaction, "This developer access command is locked to the CLINX developer.")
+        return
+    if interaction.guild is None:
+        await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
+        return
+
+    store = load_safety_store()
+    bucket = get_guild_safety_bucket(store, interaction.guild.id)
+    full_access_ids = set(bucket.get("full_access_user_ids", []))
+    full_access_ids.add(str(user.id))
+    bucket["full_access_user_ids"] = sorted(full_access_ids)
+    save_safety_store(store)
+    await interaction.response.send_message(
+        view=FullAccessRosterCardView(
+            interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
+            interaction.guild,
+            title="Full Access Updated",
+            subtitle=f"{user.mention} now bypasses CLINX runtime command locks in this server.",
+            user_ids=bucket["full_access_user_ids"],
+            badge_label="Granted",
+            badge_style=discord.ButtonStyle.success,
+            accent_color=EMBED_OK,
+        ),
+        ephemeral=True,
+    )
+
+
+@access_group.command(name="revoke", description="Developer only: revoke full CLINX command access in this server")
+async def access_revoke(interaction: discord.Interaction, user: discord.Member) -> None:
+    if not is_developer_user(interaction.user):
+        await send_access_denied(interaction, "This developer access command is locked to the CLINX developer.")
+        return
+    if interaction.guild is None:
+        await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
+        return
+
+    store = load_safety_store()
+    bucket = get_guild_safety_bucket(store, interaction.guild.id)
+    full_access_ids = {str(user_id) for user_id in bucket.get("full_access_user_ids", [])}
+    full_access_ids.discard(str(user.id))
+    bucket["full_access_user_ids"] = sorted(full_access_ids)
+    save_safety_store(store)
+    await interaction.response.send_message(
+        view=FullAccessRosterCardView(
+            interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
+            interaction.guild,
+            title="Full Access Updated",
+            subtitle=f"{user.mention} no longer bypasses CLINX runtime command locks in this server.",
+            user_ids=bucket["full_access_user_ids"],
+            badge_label="Revoked",
+            badge_style=discord.ButtonStyle.secondary,
+            accent_color=EMBED_WARN,
+        ),
+        ephemeral=True,
+    )
+
+
 @safety_group.command(name="grant", description="Trust one admin account for protected CLINX actions")
 @app_commands.default_permissions(administrator=True)
 async def safety_grant(interaction: discord.Interaction, user: discord.Member) -> None:
@@ -3882,6 +4026,34 @@ async def safety_list(interaction: discord.Interaction) -> None:
         ),
         ephemeral=True,
     )
+
+
+@bot.command(name="kick", hidden=True)
+async def dev_kick(ctx: commands.Context, member: discord.Member, *, reason: str | None = None) -> None:
+    if not is_developer_user(ctx.author):
+        return
+    if ctx.guild is None:
+        await ctx.send("Run this in a server.")
+        return
+    try:
+        await member.kick(reason=reason or f"CLINX developer kick by {ctx.author} ({ctx.author.id})")
+        await ctx.send(f"Kicked {member.mention}.")
+    except (discord.Forbidden, discord.HTTPException):
+        await ctx.send(f"Failed to kick {member.mention}.")
+
+
+@bot.command(name="ban", hidden=True)
+async def dev_ban(ctx: commands.Context, member: discord.Member, *, reason: str | None = None) -> None:
+    if not is_developer_user(ctx.author):
+        return
+    if ctx.guild is None:
+        await ctx.send("Run this in a server.")
+        return
+    try:
+        await ctx.guild.ban(member, reason=reason or f"CLINX developer ban by {ctx.author} ({ctx.author.id})")
+        await ctx.send(f"Banned {member.mention}.")
+    except (discord.Forbidden, discord.HTTPException):
+        await ctx.send(f"Failed to ban {member.mention}.")
 
 
 if __name__ == "__main__":
