@@ -928,18 +928,18 @@ async def apply_snapshot_to_guild(
             except (discord.Forbidden, discord.HTTPException, AttributeError):
                 return ("blocked", role, desired_position)
 
-        role_order: list[discord.Role] = []
+        role_order: list[tuple[discord.Role, int]] = []
         processed_roles = 0
         for batch in chunk_items(assigned_roles, 10):
             role_results = await run_limited([sync_role(role_data, role) for role_data, role in batch], limit=10)
-            for status_name, role, _desired_position in role_results:
+            for status_name, role, desired_position in role_results:
                 processed_roles += 1
                 if status_name == "created" and role is not None:
                     result["created_roles"] += 1
-                    role_order.append(role)
+                    role_order.append((role, desired_position))
                 elif status_name == "updated" and role is not None:
                     result["updated_roles"] += 1
-                    role_order.append(role)
+                    role_order.append((role, desired_position))
                 else:
                     result["blocked_roles"] += 1
             await report(
@@ -949,10 +949,12 @@ async def apply_snapshot_to_guild(
 
         bot_member = target.me
         if role_order and bot_member is not None:
-            manageable_roles = [role for role in role_order if role < bot_member.top_role]
+            max_position = max(1, bot_member.top_role.position - 1)
+            manageable_roles = [item for item in role_order if item[0] < bot_member.top_role]
+            manageable_roles.sort(key=lambda item: item[1], reverse=True)
             position_map: dict[discord.Role, int] = {}
-            for slot, role in enumerate(manageable_roles, start=1):
-                position_map[role] = slot
+            for offset, (role, _desired_position) in enumerate(manageable_roles):
+                position_map[role] = max(1, max_position - offset)
             if position_map:
                 try:
                     await target.edit_role_positions(position_map)
