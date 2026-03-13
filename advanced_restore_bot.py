@@ -3728,7 +3728,7 @@ COMMAND_LIBRARY_LANES: tuple[CommandLibraryLane, ...] = (
         accent=0x9A7CFF,
         blurb="Operator-facing panels and public bot surfaces.",
         entries=(
-            CommandLibraryEntry("/help", "Open the CLINX command library.", "Browse command lanes, page through the catalog, and inspect each command in a single surface.", "Public"),
+            CommandLibraryEntry("/help", "Get a list of commands or more information about a specific command.", "Browse command lanes, page through the catalog, and inspect each command in a single surface.", "Public"),
             CommandLibraryEntry("/invite", "Get the bot invite link.", "Returns the OAuth invite for CLINX with bot and slash command scopes.", "Public"),
             CommandLibraryEntry("/leave", "Make CLINX leave the current server.", "Tells the bot to exit the server immediately after confirmation.", "Private"),
         ),
@@ -4056,7 +4056,7 @@ safety_group = app_commands.Group(name="safety", description="CLINX trust and ap
 @bot.event
 async def on_ready() -> None:
     await bot.change_presence(
-        activity=discord.Activity(type=discord.ActivityType.watching, name="/help")
+        activity=discord.Activity(type=discord.ActivityType.listening, name="/help")
     )
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
@@ -4952,7 +4952,7 @@ async def import_cancel(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=make_embed("Import", "Cancel requested.", EMBED_WARN), ephemeral=True)
 
 
-@bot.tree.command(name="help", description="Open the CLINX command library")
+@bot.tree.command(name="help", description="Get a list of commands or more information about a specific command")
 async def help_cmd(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(view=CommandLibraryView(interaction.client.user if isinstance(interaction.client, commands.Bot) else None))
 
