@@ -264,6 +264,10 @@ async def run_limited(tasks: list[Any], *, limit: int = 6) -> list[Any]:
     return await asyncio.gather(*(runner(task) for task in tasks))
 
 
+def chunk_items(items: list[Any], size: int) -> list[list[Any]]:
+    return [items[index:index + size] for index in range(0, len(items), size)]
+
+
 async def backup_id_autocomplete(
     interaction: discord.Interaction,
     current: str,
@@ -864,12 +868,19 @@ async def apply_snapshot_to_guild(
             except (discord.Forbidden, discord.HTTPException):
                 return ("blocked", role)
 
-        role_delete_results = await run_limited([delete_role(role) for role in roles_to_delete], limit=8)
-        for status_name, _ in role_delete_results:
-            if status_name == "deleted":
-                result["deleted_roles"] += 1
-            else:
-                result["blocked_roles"] += 1
+        deleted_total = 0
+        for batch in chunk_items(roles_to_delete, 10):
+            role_delete_results = await run_limited([delete_role(role) for role in batch], limit=10)
+            for status_name, _ in role_delete_results:
+                if status_name == "deleted":
+                    result["deleted_roles"] += 1
+                    deleted_total += 1
+                else:
+                    result["blocked_roles"] += 1
+            await report(
+                "Wiping Roles",
+                f"Clearing live roles so the backup stack can be rebuilt cleanly. `{deleted_total}` of `{len(roles_to_delete)}` roles processed.",
+            )
 
     if load_roles and not create_only_missing:
         await report("Rebuilding Roles", "Creating and updating the role stack from the backup snapshot.")
@@ -917,17 +928,24 @@ async def apply_snapshot_to_guild(
             except (discord.Forbidden, discord.HTTPException, AttributeError):
                 return ("blocked", role, desired_position)
 
-        role_results = await run_limited([sync_role(role_data, role) for role_data, role in assigned_roles], limit=8)
         role_order: list[discord.Role] = []
-        for status_name, role, _desired_position in role_results:
-            if status_name == "created" and role is not None:
-                result["created_roles"] += 1
-                role_order.append(role)
-            elif status_name == "updated" and role is not None:
-                result["updated_roles"] += 1
-                role_order.append(role)
-            else:
-                result["blocked_roles"] += 1
+        processed_roles = 0
+        for batch in chunk_items(assigned_roles, 10):
+            role_results = await run_limited([sync_role(role_data, role) for role_data, role in batch], limit=10)
+            for status_name, role, _desired_position in role_results:
+                processed_roles += 1
+                if status_name == "created" and role is not None:
+                    result["created_roles"] += 1
+                    role_order.append(role)
+                elif status_name == "updated" and role is not None:
+                    result["updated_roles"] += 1
+                    role_order.append(role)
+                else:
+                    result["blocked_roles"] += 1
+            await report(
+                "Rebuilding Roles",
+                f"Creating and updating the role stack from the backup snapshot. `{processed_roles}` of `{len(assigned_roles)}` roles processed.",
+            )
 
         bot_member = target.me
         if role_order and bot_member is not None:
