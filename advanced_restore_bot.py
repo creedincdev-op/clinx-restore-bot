@@ -8,7 +8,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,18 @@ DEFAULT_BACKUP_GUILD_ID = os.getenv("DEFAULT_BACKUP_GUILD_ID")
 SUPPORT_URL = "https://discord.gg/V6YEw2Wxcb"
 DEVELOPER_USER_IDS = {1240237445841420302}
 FREE_BACKUP_LIMIT = 7
+INTERVAL_PRESET_HOURS: tuple[int, ...] = (4, 8, 12, 24, 48, 72, 168, 336, 720)
+INTERVAL_PRESET_CHOICES = [
+    app_commands.Choice(name="4 hours", value=4),
+    app_commands.Choice(name="8 hours", value=8),
+    app_commands.Choice(name="12 hours", value=12),
+    app_commands.Choice(name="24 hours", value=24),
+    app_commands.Choice(name="2 days", value=48),
+    app_commands.Choice(name="3 days", value=72),
+    app_commands.Choice(name="7 days", value=168),
+    app_commands.Choice(name="14 days", value=336),
+    app_commands.Choice(name="30 days", value=720),
+]
 PLAN_BACKUP_LIMITS = {
     "free": FREE_BACKUP_LIMIT,
     "pro": 50,
@@ -203,6 +215,7 @@ def get_guild_safety_bucket(store: dict[str, Any], guild_id: int) -> dict[str, A
             "trusted_admin_ids": [],
             "full_access_user_ids": [],
             "premium_entitlement": None,
+            "backup_interval": None,
         },
     )
     if not isinstance(bucket.get("trusted_admin_ids"), list):
@@ -211,6 +224,8 @@ def get_guild_safety_bucket(store: dict[str, Any], guild_id: int) -> dict[str, A
         bucket["full_access_user_ids"] = []
     if bucket.get("premium_entitlement") is not None and not isinstance(bucket.get("premium_entitlement"), dict):
         bucket["premium_entitlement"] = None
+    if bucket.get("backup_interval") is not None and not isinstance(bucket.get("backup_interval"), dict):
+        bucket["backup_interval"] = None
     bucket["trusted_admin_ids"] = sorted({str(user_id) for user_id in bucket["trusted_admin_ids"]})
     bucket["full_access_user_ids"] = sorted({str(user_id) for user_id in bucket["full_access_user_ids"]})
     return bucket
@@ -224,6 +239,49 @@ def format_backup_timestamp(created_at: str | None) -> str:
     except ValueError:
         return "Unknown time"
     return dt.astimezone(timezone.utc).strftime("%d %b %Y - %H:%M UTC")
+
+
+def parse_iso_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def format_relative_timestamp(value: str | None) -> str:
+    target = parse_iso_timestamp(value)
+    if target is None:
+        return "Not scheduled"
+    now = datetime.now(timezone.utc)
+    delta = target - now
+    seconds = int(delta.total_seconds())
+    suffix = "from now" if seconds >= 0 else "ago"
+    seconds = abs(seconds)
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes or not parts:
+        parts.append(f"{minutes}m")
+    return f"{' '.join(parts)} {suffix}"
+
+
+def format_interval_label(interval_hours: int | None) -> str:
+    if not interval_hours:
+        return "Off"
+    if interval_hours % 24 == 0:
+        days = interval_hours // 24
+        return f"{days} day" + ("s" if days != 1 else "")
+    return f"{interval_hours} hour" + ("s" if interval_hours != 1 else "")
 
 
 def get_user_backup_entries(store: dict[str, Any], user_id: int) -> list[dict[str, Any]]:
@@ -465,6 +523,61 @@ def build_backup_choice_label(record: dict[str, Any]) -> str:
     return label[:100]
 
 
+async def trim_interval_backups_for_owner(
+    owner_user_id: int,
+    *,
+    guild_id: int,
+    keep_count: int,
+    backup_limit: int,
+) -> tuple[bool, int]:
+    entries = await list_user_backup_entries_async(owner_user_id)
+    interval_entries = [
+        entry
+        for entry in entries
+        if (entry.get("auto_backup") or {}).get("type") == "interval"
+        and str((entry.get("auto_backup") or {}).get("guild_id")) == str(guild_id)
+    ]
+    interval_entries = sorted(interval_entries, key=lambda entry: entry.get("created_at", ""))
+    needed_slots = max(0, len(entries) + 1 - backup_limit)
+    needed_keep_trim = max(0, len(interval_entries) + 1 - keep_count)
+    delete_count = max(needed_slots, needed_keep_trim)
+    if delete_count == 0:
+        return True, 0
+    if len(interval_entries) < delete_count:
+        return False, 0
+    deleted = 0
+    for entry in interval_entries[:delete_count]:
+        if await delete_user_backup_async(owner_user_id, entry["id"]):
+            deleted += 1
+    return deleted == delete_count, deleted
+
+
+async def create_backup_record_for_owner(
+    source: discord.Guild,
+    *,
+    owner_user_id: int,
+    owner_display_name: str,
+    include_assets: bool = True,
+    auto_backup: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    snapshot = await build_guild_snapshot(source, include_assets=include_assets)
+    backup_id = f"BKP-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{secrets.token_hex(3).upper()}"
+    record = {
+        "id": backup_id,
+        "created_at": utc_now_iso(),
+        "created_by_user_id": str(owner_user_id),
+        "created_by_display_name": owner_display_name,
+        "source_guild_id": source.id,
+        "source_guild_name": source.name,
+        "summary": build_backup_summary(snapshot),
+        "snapshot": snapshot,
+    }
+    if auto_backup:
+        record["auto_backup"] = auto_backup
+    await save_backup_record_async(record)
+    return record
+
+
 def channel_signature(*, name: str, category: str | None, kind: str) -> tuple[str, str, str]:
     return kind, category or "", name
 
@@ -645,6 +758,79 @@ def set_guild_premium_entitlement(guild: discord.Guild, gifted_to_user_id: int, 
     bucket["premium_entitlement"] = entitlement
     save_safety_store(store)
     return entitlement
+
+
+def get_backup_interval_config(guild_id: int) -> dict[str, Any] | None:
+    store = load_safety_store()
+    bucket = get_guild_safety_bucket(store, guild_id)
+    config = bucket.get("backup_interval")
+    return dict(config) if isinstance(config, dict) else None
+
+
+def set_backup_interval_config(
+    guild: discord.Guild,
+    *,
+    owner_user_id: int,
+    owner_display_name: str,
+    interval_hours: int,
+    keep_count: int,
+) -> dict[str, Any]:
+    now = utc_now_iso()
+    next_run = datetime.now(timezone.utc).timestamp() + (interval_hours * 3600)
+    config = {
+        "enabled": True,
+        "owner_user_id": str(owner_user_id),
+        "owner_display_name": owner_display_name,
+        "interval_hours": int(interval_hours),
+        "keep_count": int(keep_count),
+        "created_at": now,
+        "updated_at": now,
+        "next_run_at": datetime.fromtimestamp(next_run, timezone.utc).isoformat(),
+        "last_run_at": None,
+        "last_success_at": None,
+        "last_backup_id": None,
+        "last_error": None,
+    }
+    store = load_safety_store()
+    bucket = get_guild_safety_bucket(store, guild.id)
+    previous = bucket.get("backup_interval")
+    if isinstance(previous, dict):
+        config["created_at"] = previous.get("created_at") or now
+        config["last_run_at"] = previous.get("last_run_at")
+        config["last_success_at"] = previous.get("last_success_at")
+        config["last_backup_id"] = previous.get("last_backup_id")
+    bucket["backup_interval"] = config
+    save_safety_store(store)
+    return config
+
+
+def disable_backup_interval_config(guild: discord.Guild) -> dict[str, Any] | None:
+    store = load_safety_store()
+    bucket = get_guild_safety_bucket(store, guild.id)
+    config = bucket.get("backup_interval")
+    if not isinstance(config, dict):
+        return None
+    config = dict(config)
+    config["enabled"] = False
+    config["updated_at"] = utc_now_iso()
+    config["next_run_at"] = None
+    bucket["backup_interval"] = config
+    save_safety_store(store)
+    return config
+
+
+def update_backup_interval_runtime(guild_id: int, **updates: Any) -> dict[str, Any] | None:
+    store = load_safety_store()
+    bucket = get_guild_safety_bucket(store, guild_id)
+    config = bucket.get("backup_interval")
+    if not isinstance(config, dict):
+        return None
+    config = dict(config)
+    config.update(updates)
+    config["updated_at"] = utc_now_iso()
+    bucket["backup_interval"] = config
+    save_safety_store(store)
+    return config
 
 
 def get_backup_limit_for_guild(guild_id: int) -> tuple[int, str]:
@@ -1925,6 +2111,123 @@ class RoleSafetyWarningCardView(discord.ui.LayoutView):
                     "- Discord does not allow CLINX to move its own role automatically."
                 ),
                 accent_color=EMBED_WARN,
+            )
+        )
+
+
+def get_backup_storage_label() -> str:
+    return "Cloudflare R2" if is_r2_backup_storage_enabled() else "Local JSON"
+
+
+def build_backup_interval_health_text(config: dict[str, Any] | None) -> str:
+    if not isinstance(config, dict):
+        return "- Auto backup lane is offline.\n- Turn it on to let CLINX seal backups on a fixed interval."
+    if not config.get("enabled"):
+        return "- Auto backup lane is disabled.\n- Existing settings are preserved until you turn it on again."
+    lines = [
+        f"- Interval: `{format_interval_label(int(config.get('interval_hours') or 0))}`",
+        f"- Keep latest: `{int(config.get('keep_count') or 1)}` backup(s)",
+        f"- Next seal: `{format_relative_timestamp(config.get('next_run_at'))}`",
+    ]
+    if config.get("last_success_at"):
+        lines.append(f"- Last success: `{format_relative_timestamp(config.get('last_success_at'))}`")
+    if config.get("last_error"):
+        lines.append(f"- Last issue: `{str(config['last_error'])[:120]}`")
+    return "\n".join(lines)
+
+
+class BackupIntervalCardView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        bot_user: discord.ClientUser | None,
+        *,
+        title: str,
+        subtitle: str,
+        guild: discord.Guild,
+        config: dict[str, Any] | None,
+        backup_count: int,
+        backup_limit: int,
+        plan_label: str,
+        color: int = EMBED_INFO,
+    ) -> None:
+        super().__init__(timeout=None)
+        self.bot_user = bot_user
+        self.title = title
+        self.subtitle = subtitle
+        self.guild = guild
+        self.config = config
+        self.backup_count = backup_count
+        self.backup_limit = backup_limit
+        self.plan_label = plan_label
+        self.color = color
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        self.clear_items()
+        hero = (
+            discord.ui.Thumbnail(self.bot_user.display_avatar.url)
+            if self.bot_user
+            else discord.ui.Button(label="CLINX", disabled=True)
+        )
+        enabled = bool(self.config and self.config.get("enabled"))
+        state_badge = discord.ui.Button(
+            label="Enabled" if enabled else "Disabled",
+            style=discord.ButtonStyle.success if enabled else discord.ButtonStyle.secondary,
+            disabled=True,
+        )
+        interval_badge = discord.ui.Button(
+            label=format_interval_label(int(self.config.get("interval_hours") or 0)) if self.config else "Off",
+            style=discord.ButtonStyle.primary if enabled else discord.ButtonStyle.secondary,
+            disabled=True,
+        )
+        owner_name = "Not assigned"
+        if isinstance(self.config, dict) and self.config.get("owner_display_name"):
+            owner_name = str(self.config["owner_display_name"])
+        runtime_text = (
+            f"Storage: `{get_backup_storage_label()}`\n"
+            f"Vault tier: `{self.plan_label}`\n"
+            f"Slots used: `{self.backup_count}/{self.backup_limit}`\n"
+            f"Vault owner: `{owner_name}`"
+        )
+        schedule_text = build_backup_interval_health_text(self.config)
+        last_backup_id = (self.config or {}).get("last_backup_id") if isinstance(self.config, dict) else None
+        last_backup_text = (
+            f"`{last_backup_id}`\n"
+            f"`{format_backup_timestamp((self.config or {}).get('last_success_at'))}`"
+            if last_backup_id
+            else "No automatic backup sealed yet."
+        )
+
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.Section(
+                    discord.ui.TextDisplay(f"## <> {self.title}"),
+                    discord.ui.TextDisplay(self.subtitle),
+                    accessory=hero,
+                ),
+                discord.ui.Separator(),
+                discord.ui.Section(
+                    discord.ui.TextDisplay("### Schedule"),
+                    discord.ui.TextDisplay(schedule_text),
+                    accessory=interval_badge,
+                ),
+                discord.ui.Section(
+                    discord.ui.TextDisplay("### Runtime"),
+                    discord.ui.TextDisplay(runtime_text),
+                    accessory=state_badge,
+                ),
+                discord.ui.Section(
+                    discord.ui.TextDisplay("### Last Auto Backup"),
+                    discord.ui.TextDisplay(last_backup_text),
+                    accessory=discord.ui.Button(label="Vault", style=discord.ButtonStyle.primary, disabled=True),
+                ),
+                discord.ui.TextDisplay(
+                    "### Commands\n"
+                    "- Use **`/backup interval on`** to arm automatic backups.\n"
+                    "- Use **`/backup interval show`** to inspect the next seal window.\n"
+                    "- Use **`/backup list`** to browse the backups stored in your vault."
+                ),
+                accent_color=self.color,
             )
         )
 
@@ -3380,6 +3683,9 @@ COMMAND_LIBRARY_LANES: tuple[CommandLibraryLane, ...] = (
             CommandLibraryEntry("/backup load", "Load a backup with lane selection and live status.", "Opens the restore planner so you can choose what to rebuild before CLINX touches the target server.", "Private"),
             CommandLibraryEntry("/backup list", "List only the backups owned by your account.", "Shows your stored backup codes with creation time so only your account can load or delete them.", "Private"),
             CommandLibraryEntry("/backup delete", "Remove a stored backup ID.", "Deletes a backup record from CLINX storage so it can no longer be loaded.", "Private"),
+            CommandLibraryEntry("/backup interval on", "Arm automatic backups for this server.", "Locks in a fixed seal interval, keeps the latest configured number of interval backups, and stores them in the selected owner's vault.", "Private"),
+            CommandLibraryEntry("/backup interval off", "Disable automatic backups for this server.", "Stops CLINX from sealing new interval backups while preserving the saved schedule and latest run data.", "Private"),
+            CommandLibraryEntry("/backup interval show", "Inspect the interval lane for this server.", "Shows the active schedule, next seal window, last automatic backup, vault owner, and storage backend.", "Private"),
             CommandLibraryEntry("/backup status", "Inspect the current load job.", "Posts or refreshes the public live status card for the active restore job in this server.", "Public"),
             CommandLibraryEntry("/backup cancel", "Cancel the current backup load.", "Stops the active restore task for this server if one is running and updates the public live card.", "Public"),
         ),
@@ -3612,6 +3918,93 @@ class CommandLibraryView(discord.ui.LayoutView):
         button.callback = callback
         return button
 
+
+async def run_backup_interval_cycle(bot_instance: commands.Bot) -> None:
+    store = load_safety_store()
+    guilds = store.get("guilds", {})
+    now = datetime.now(timezone.utc)
+    due_runs: list[tuple[int, dict[str, Any]]] = []
+    changed = False
+
+    for guild_key in list(guilds.keys()):
+        try:
+            guild_id = int(guild_key)
+        except ValueError:
+            continue
+        bucket = get_guild_safety_bucket(store, guild_id)
+        config = bucket.get("backup_interval")
+        if not isinstance(config, dict) or not config.get("enabled"):
+            continue
+        interval_hours = int(config.get("interval_hours") or 0)
+        if interval_hours not in INTERVAL_PRESET_HOURS:
+            config["enabled"] = False
+            config["last_error"] = "Invalid interval preset configured."
+            bucket["backup_interval"] = config
+            changed = True
+            continue
+        next_run = parse_iso_timestamp(config.get("next_run_at"))
+        if next_run is None:
+            config["next_run_at"] = (now + timedelta(hours=interval_hours)).isoformat()
+            bucket["backup_interval"] = config
+            changed = True
+            continue
+        if next_run <= now:
+            config["next_run_at"] = (now + timedelta(hours=interval_hours)).isoformat()
+            config["last_run_at"] = utc_now_iso()
+            bucket["backup_interval"] = config
+            due_runs.append((guild_id, dict(config)))
+            changed = True
+
+    if changed:
+        save_safety_store(store)
+
+    for guild_id, config in due_runs:
+        guild = bot_instance.get_guild(guild_id)
+        if guild is None:
+            update_backup_interval_runtime(guild_id, last_error="CLINX could not find this server in cache during the interval run.")
+            continue
+        owner_user_id = int(config.get("owner_user_id") or guild.owner_id)
+        owner_display_name = str(config.get("owner_display_name") or guild.owner or f"Guild Owner {owner_user_id}")
+        backup_limit, _ = get_backup_limit_for_guild(guild.id)
+        keep_count = max(1, min(int(config.get("keep_count") or 1), backup_limit))
+        can_rotate, _ = await trim_interval_backups_for_owner(
+            owner_user_id,
+            guild_id=guild.id,
+            keep_count=keep_count,
+            backup_limit=backup_limit,
+        )
+        if not can_rotate:
+            update_backup_interval_runtime(
+                guild.id,
+                keep_count=keep_count,
+                last_error="Vault is full. Delete older backups or upgrade the vault tier before the next automatic seal.",
+            )
+            continue
+        try:
+            record = await create_backup_record_for_owner(
+                guild,
+                owner_user_id=owner_user_id,
+                owner_display_name=owner_display_name,
+                include_assets=True,
+                auto_backup={
+                    "type": "interval",
+                    "guild_id": str(guild.id),
+                    "interval_hours": int(config.get("interval_hours") or 0),
+                    "keep_count": keep_count,
+                    "sealed_at": utc_now_iso(),
+                },
+            )
+        except Exception as exc:
+            update_backup_interval_runtime(guild.id, last_error=str(exc)[:180])
+            continue
+        update_backup_interval_runtime(
+            guild.id,
+            keep_count=keep_count,
+            last_success_at=utc_now_iso(),
+            last_backup_id=record["id"],
+            last_error=None,
+        )
+
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
@@ -3623,6 +4016,7 @@ class ClinxBot(commands.Bot):
         super().__init__(*args, **kwargs)
         self._groups_added = False
         self._startup_synced = False
+        self._backup_interval_task: asyncio.Task[Any] | None = None
 
     async def setup_hook(self) -> None:
         if not self._groups_added:
@@ -3637,10 +4031,23 @@ class ClinxBot(commands.Bot):
             self._startup_synced = True
             print(f"Synced {len(synced)} slash commands")
 
+        if self._backup_interval_task is None:
+            self._backup_interval_task = asyncio.create_task(self._backup_interval_worker(), name="clinx-backup-interval")
+
+    async def _backup_interval_worker(self) -> None:
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                await run_backup_interval_cycle(self)
+            except Exception as exc:
+                print(f"Backup interval worker error: {exc}")
+            await asyncio.sleep(60)
+
 
 bot = ClinxBot(command_prefix=commands.when_mentioned_or("^^^"), intents=intents)
 
 backup_group = app_commands.Group(name="backup", description="Backup and restore commands")
+backup_interval_group = app_commands.Group(name="interval", description="Automatic backup interval controls", parent=backup_group)
 export_group = app_commands.Group(name="export", description="Export server objects")
 import_group = app_commands.Group(name="import", description="Import server objects")
 safety_group = app_commands.Group(name="safety", description="CLINX trust and approval controls")
@@ -3719,25 +4126,19 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
             )
             return
 
-    snapshot = await build_guild_snapshot(source)
     source_warnings = build_source_hierarchy_warnings(source)
-    backup_id = f"BKP-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{secrets.token_hex(3).upper()}"
-    record = {
-        "id": backup_id,
-        "created_at": utc_now_iso(),
-        "created_by_user_id": str(interaction.user.id),
-        "created_by_display_name": str(interaction.user),
-        "source_guild_id": source.id,
-        "source_guild_name": source.name,
-        "summary": build_backup_summary(snapshot),
-        "snapshot": snapshot,
-    }
-    await save_backup_record_async(record)
+    record = await create_backup_record_for_owner(
+        source,
+        owner_user_id=interaction.user.id,
+        owner_display_name=str(interaction.user),
+        include_assets=True,
+    )
+    snapshot = record["snapshot"]
 
     await interaction.followup.send(
         view=BackupCreatedCardView(
             interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
-            backup_id,
+            record["id"],
             source,
             snapshot,
         ),
@@ -3840,6 +4241,115 @@ async def backup_delete(interaction: discord.Interaction, load_id: str) -> None:
         return
     await delete_user_backup_async(interaction.user.id, load_id)
     await interaction.response.send_message(embed=make_embed("Deleted", f"Removed `{load_id}`.", EMBED_OK), ephemeral=True)
+
+
+@backup_interval_group.command(name="on", description="Enable automatic interval backups for this server")
+@app_commands.describe(interval="How often CLINX should seal a backup", keep="How many interval backups CLINX should keep in the vault")
+@app_commands.choices(interval=INTERVAL_PRESET_CHOICES)
+@app_commands.default_permissions(administrator=True)
+async def backup_interval_on(
+    interaction: discord.Interaction,
+    interval: app_commands.Choice[int],
+    keep: app_commands.Range[int, 1, 250] = 1,
+) -> None:
+    access_mode, _, message = require_clinx_access(interaction, "backup_create")
+    if access_mode == "deny":
+        await send_access_denied(interaction, message or "You cannot configure backup intervals in this server.")
+        return
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(embed=make_embed("Error", "Run this in the server you want to schedule.", EMBED_ERR), ephemeral=True)
+        return
+    backup_limit, plan_label = get_backup_limit_for_guild(guild.id)
+    keep_count = min(int(keep), backup_limit)
+    config = set_backup_interval_config(
+        guild,
+        owner_user_id=interaction.user.id,
+        owner_display_name=str(interaction.user),
+        interval_hours=interval.value,
+        keep_count=keep_count,
+    )
+    entries = await list_user_backup_entries_async(interaction.user.id)
+    subtitle = (
+        f"Automatic backups are now armed every `{format_interval_label(interval.value)}`. "
+        f"CLINX will keep the latest `{keep_count}` interval snapshot(s) in your vault."
+    )
+    await interaction.response.send_message(
+        view=BackupIntervalCardView(
+            interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
+            title="Backup Interval Armed",
+            subtitle=subtitle,
+            guild=guild,
+            config=config,
+            backup_count=len(entries),
+            backup_limit=backup_limit,
+            plan_label=plan_label,
+            color=EMBED_OK,
+        ),
+        ephemeral=True,
+    )
+
+
+@backup_interval_group.command(name="off", description="Disable automatic interval backups for this server")
+@app_commands.default_permissions(administrator=True)
+async def backup_interval_off(interaction: discord.Interaction) -> None:
+    access_mode, _, message = require_clinx_access(interaction, "backup_create")
+    if access_mode == "deny":
+        await send_access_denied(interaction, message or "You cannot configure backup intervals in this server.")
+        return
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(embed=make_embed("Error", "Run this in the server you want to update.", EMBED_ERR), ephemeral=True)
+        return
+    config = disable_backup_interval_config(guild)
+    owner_user_id = int(config.get("owner_user_id") or interaction.user.id) if config else interaction.user.id
+    entries = await list_user_backup_entries_async(owner_user_id)
+    backup_limit, plan_label = get_backup_limit_for_guild(guild.id)
+    await interaction.response.send_message(
+        view=BackupIntervalCardView(
+            interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
+            title="Backup Interval Offline",
+            subtitle="Automatic backups are disabled for this server. CLINX will stop sealing new interval backups until you turn the lane on again.",
+            guild=guild,
+            config=config,
+            backup_count=len(entries),
+            backup_limit=backup_limit,
+            plan_label=plan_label,
+            color=EMBED_WARN,
+        ),
+        ephemeral=True,
+    )
+
+
+@backup_interval_group.command(name="show", description="Show the automatic backup interval for this server")
+@app_commands.default_permissions(administrator=True)
+async def backup_interval_show(interaction: discord.Interaction) -> None:
+    access_mode, _, message = require_clinx_access(interaction, "backup_create")
+    if access_mode == "deny":
+        await send_access_denied(interaction, message or "You cannot inspect backup intervals in this server.")
+        return
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(embed=make_embed("Error", "Run this in the server you want to inspect.", EMBED_ERR), ephemeral=True)
+        return
+    config = get_backup_interval_config(guild.id)
+    owner_user_id = int(config.get("owner_user_id") or interaction.user.id) if isinstance(config, dict) else interaction.user.id
+    entries = await list_user_backup_entries_async(owner_user_id)
+    backup_limit, plan_label = get_backup_limit_for_guild(guild.id)
+    await interaction.response.send_message(
+        view=BackupIntervalCardView(
+            interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
+            title="Backup Interval",
+            subtitle="Inspect the automatic seal lane for this server, including the next run window and the vault CLINX writes into.",
+            guild=guild,
+            config=config,
+            backup_count=len(entries),
+            backup_limit=backup_limit,
+            plan_label=plan_label,
+            color=EMBED_INFO,
+        ),
+        ephemeral=True,
+    )
 
 
 @backup_group.command(name="status", description="Get current backup load status")
