@@ -2233,6 +2233,8 @@ class BackupIntervalCardView(discord.ui.LayoutView):
 
 
 BACKUP_VAULT_PAGE_SIZE = 10
+BACKUP_STRUCTURE_PREVIEW_LIMIT = 900
+BACKUP_ROLE_PREVIEW_LIMIT = 900
 
 
 def format_backup_structure_preview(summary: dict[str, Any] | None) -> str:
@@ -2242,7 +2244,7 @@ def format_backup_structure_preview(summary: dict[str, Any] | None) -> str:
     overflow = int(summary.get("structure_overflow", 0) or 0)
     if overflow > 0:
         lines.append(f"... +{overflow} more")
-    return "```text\n" + "\n".join(lines)[:1500] + "\n```"
+    return "```text\n" + "\n".join(lines)[:BACKUP_STRUCTURE_PREVIEW_LIMIT] + "\n```"
 
 
 def format_backup_role_preview(summary: dict[str, Any] | None) -> str:
@@ -2252,7 +2254,7 @@ def format_backup_role_preview(summary: dict[str, Any] | None) -> str:
     overflow = int(summary.get("role_overflow", 0) or 0)
     if overflow > 0:
         lines.append(f"... +{overflow} more")
-    return "```text\n" + "\n".join(lines)[:1500] + "\n```"
+    return "```text\n" + "\n".join(lines)[:BACKUP_ROLE_PREVIEW_LIMIT] + "\n```"
 
 
 class BackupVaultSelect(discord.ui.Select["BackupListCardView"]):
@@ -2441,14 +2443,16 @@ class BackupListCardView(discord.ui.LayoutView):
             return
 
         if selected_entry is None:
-            page_feed_lines: list[str] = []
+            page_feed_blocks: list[str] = []
             for index, entry in enumerate(page_entries, start=(self.page * BACKUP_VAULT_PAGE_SIZE) + 1):
-                page_feed_lines.extend(
-                    [
-                        f"{index}. `{entry.get('id', 'unknown')}`",
-                        f"- Source: `{entry.get('source_guild_name', 'Unknown Source')}`",
-                        f"- Created: `{format_backup_timestamp(entry.get('created_at'))}`",
-                    ]
+                page_feed_blocks.append(
+                    "\n".join(
+                        [
+                            f"{index}. `{entry.get('id', 'unknown')}`",
+                            f"- Source: `{entry.get('source_guild_name', 'Unknown Source')}`",
+                            f"- Created: `{format_backup_timestamp(entry.get('created_at'))}`",
+                        ]
+                    )
                 )
             container = discord.ui.Container(
                 discord.ui.Section(
@@ -2477,7 +2481,7 @@ class BackupListCardView(discord.ui.LayoutView):
                 ),
                 discord.ui.TextDisplay(
                     "### Vault Page\n"
-                    f"{chr(10).join(page_feed_lines[:24]) if page_feed_lines else '- No backups on this page.'}"
+                    f"{chr(10).join(page_feed_blocks[:8]) if page_feed_blocks else '- No backups on this page.'}"
                 ),
                 accent_color=EMBED_INFO,
             )
