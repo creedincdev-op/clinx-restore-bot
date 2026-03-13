@@ -1311,14 +1311,6 @@ def build_backup_hierarchy_warnings(
                 f"`{len(higher_live_roles)}` live roles still sit at or above the CLINX role in this server. "
                 "Move CLINX higher or those roles cannot be managed correctly."
             )
-        available_slots = max(0, bot_member.top_role.position - 1)
-        backup_role_count = len(snapshot.get("roles", []))
-        if backup_role_count > available_slots:
-            blocked_role_count = backup_role_count - available_slots
-            warnings.append(
-                f"`{blocked_role_count}` backup roles would overflow the space below the CLINX role in this server. "
-                "Move CLINX higher or the final role order cannot match the snapshot."
-            )
 
     if "load_channels" in selected_actions and not bot_member.guild_permissions.manage_channels:
         warnings.append("CLINX is missing **Manage Channels** in the target server.")
@@ -1472,6 +1464,7 @@ class BackupListCardView(discord.ui.LayoutView):
             if self.bot_user
             else discord.ui.Button(label="CLINX", disabled=True)
         )
+        newest_entry = self.entries[0] if self.entries else None
         blocks: list[str] = []
         for index, entry in enumerate(self.entries, start=1):
             blocks.append(
@@ -1479,17 +1472,23 @@ class BackupListCardView(discord.ui.LayoutView):
                 f"- Source: `{entry.get('source_guild_name', 'Unknown Source')}`\n"
                 f"- Created: `{format_backup_timestamp(entry.get('created_at'))}`"
             )
+        vault_summary = "No private backups are ready yet."
+        if newest_entry is not None:
+            vault_summary = (
+                f"Newest ID: `{newest_entry['id']}`\n"
+                f"Latest Source: `{newest_entry.get('source_guild_name', 'Unknown Source')}`"
+            )
         self.add_item(
             discord.ui.Container(
                 discord.ui.Section(
                     discord.ui.TextDisplay("## <> Backup Vault"),
-                    discord.ui.TextDisplay("Private recovery IDs owned by your account are listed here."),
+                    discord.ui.TextDisplay("Private recovery IDs owned by your account are listed here.\nUse `/backup load` to open the restore planner."),
                     accessory=hero,
                 ),
                 discord.ui.Separator(),
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Vault Feed"),
-                    discord.ui.TextDisplay(f"`{len(self.entries)}` backup IDs ready for restore"),
+                    discord.ui.TextDisplay(f"`{len(self.entries)}` backup IDs ready for restore\n{vault_summary}"),
                     accessory=discord.ui.Button(label="Private", style=discord.ButtonStyle.secondary, disabled=True),
                 ),
                 discord.ui.TextDisplay("### Your Backups\n" + "\n\n".join(blocks)),
