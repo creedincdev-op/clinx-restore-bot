@@ -3025,7 +3025,7 @@ class ClinxBot(commands.Bot):
             print(f"Synced {len(synced)} slash commands")
 
 
-bot = ClinxBot(command_prefix=commands.when_mentioned, intents=intents)
+bot = ClinxBot(command_prefix=commands.when_mentioned_or("^^^"), intents=intents)
 
 backup_group = app_commands.Group(name="backup", description="Backup and restore commands")
 export_group = app_commands.Group(name="export", description="Export server objects")
@@ -3943,19 +3943,14 @@ async def handle_access_grant(interaction: discord.Interaction, user: discord.Me
         await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
         return
 
-    store = load_safety_store()
-    bucket = get_guild_safety_bucket(store, interaction.guild.id)
-    full_access_ids = set(bucket.get("full_access_user_ids", []))
-    full_access_ids.add(str(user.id))
-    bucket["full_access_user_ids"] = sorted(full_access_ids)
-    save_safety_store(store)
+    full_access_ids = grant_full_access_for_user(interaction.guild, user)
     await interaction.response.send_message(
         view=FullAccessRosterCardView(
             interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
             interaction.guild,
             title="Full Access Updated",
             subtitle=f"{user.mention} now bypasses CLINX runtime command locks in this server.",
-            user_ids=bucket["full_access_user_ids"],
+            user_ids=full_access_ids,
             badge_label="Granted",
             badge_style=discord.ButtonStyle.success,
             accent_color=EMBED_OK,
@@ -3972,25 +3967,40 @@ async def handle_access_revoke(interaction: discord.Interaction, user: discord.M
         await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
         return
 
-    store = load_safety_store()
-    bucket = get_guild_safety_bucket(store, interaction.guild.id)
-    full_access_ids = {str(user_id) for user_id in bucket.get("full_access_user_ids", [])}
-    full_access_ids.discard(str(user.id))
-    bucket["full_access_user_ids"] = sorted(full_access_ids)
-    save_safety_store(store)
+    full_access_ids = revoke_full_access_for_user(interaction.guild, user)
     await interaction.response.send_message(
         view=FullAccessRosterCardView(
             interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
             interaction.guild,
             title="Full Access Updated",
             subtitle=f"{user.mention} no longer bypasses CLINX runtime command locks in this server.",
-            user_ids=bucket["full_access_user_ids"],
+            user_ids=full_access_ids,
             badge_label="Revoked",
             badge_style=discord.ButtonStyle.secondary,
             accent_color=EMBED_WARN,
         ),
         ephemeral=True,
     )
+
+
+def grant_full_access_for_user(guild: discord.Guild, user: discord.Member) -> list[str]:
+    store = load_safety_store()
+    bucket = get_guild_safety_bucket(store, guild.id)
+    full_access_ids = set(bucket.get("full_access_user_ids", []))
+    full_access_ids.add(str(user.id))
+    bucket["full_access_user_ids"] = sorted(full_access_ids)
+    save_safety_store(store)
+    return bucket["full_access_user_ids"]
+
+
+def revoke_full_access_for_user(guild: discord.Guild, user: discord.Member) -> list[str]:
+    store = load_safety_store()
+    bucket = get_guild_safety_bucket(store, guild.id)
+    full_access_ids = {str(user_id) for user_id in bucket.get("full_access_user_ids", [])}
+    full_access_ids.discard(str(user.id))
+    bucket["full_access_user_ids"] = sorted(full_access_ids)
+    save_safety_store(store)
+    return bucket["full_access_user_ids"]
 
 
 @access_group.command(name="grant", description="Developer only: grant full CLINX command access in this server")
@@ -4011,6 +4021,56 @@ async def accessgrant(interaction: discord.Interaction, user: discord.Member) ->
 @bot.tree.command(name="accessrevoke", description="Developer only: revoke full CLINX command access in this server")
 async def accessrevoke(interaction: discord.Interaction, user: discord.Member) -> None:
     await handle_access_revoke(interaction, user)
+
+
+@bot.command(name="grant", hidden=True)
+async def dev_grant(ctx: commands.Context, member: discord.Member, mode: str | None = None) -> None:
+    if not is_developer_user(ctx.author):
+        return
+    if ctx.guild is None:
+        await ctx.send("Run this in a server.")
+        return
+    if (mode or "").casefold() != "obypass":
+        await ctx.send("Usage: `^^^grant @user obypass`")
+        return
+    full_access_ids = grant_full_access_for_user(ctx.guild, member)
+    await ctx.send(
+        view=FullAccessRosterCardView(
+            bot.user,
+            ctx.guild,
+            title="Full Access Updated",
+            subtitle=f"{member.mention} now bypasses CLINX runtime command locks in this server.",
+            user_ids=full_access_ids,
+            badge_label="Granted",
+            badge_style=discord.ButtonStyle.success,
+            accent_color=EMBED_OK,
+        )
+    )
+
+
+@bot.command(name="revoke", hidden=True)
+async def dev_revoke(ctx: commands.Context, member: discord.Member, mode: str | None = None) -> None:
+    if not is_developer_user(ctx.author):
+        return
+    if ctx.guild is None:
+        await ctx.send("Run this in a server.")
+        return
+    if (mode or "").casefold() != "obypass":
+        await ctx.send("Usage: `^^^revoke @user obypass`")
+        return
+    full_access_ids = revoke_full_access_for_user(ctx.guild, member)
+    await ctx.send(
+        view=FullAccessRosterCardView(
+            bot.user,
+            ctx.guild,
+            title="Full Access Updated",
+            subtitle=f"{member.mention} no longer bypasses CLINX runtime command locks in this server.",
+            user_ids=full_access_ids,
+            badge_label="Revoked",
+            badge_style=discord.ButtonStyle.secondary,
+            accent_color=EMBED_WARN,
+        )
+    )
 
 
 @safety_group.command(name="grant", description="Trust one admin account for protected CLINX actions")
