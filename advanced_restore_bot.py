@@ -445,8 +445,6 @@ def get_command_safety_tier(command_name: str, *, selected_actions: set[str] | N
         "backup_create",
         "backup_list",
         "backup_delete",
-        "backupcreate",
-        "backuplist",
         "export_guild",
         "export_channels",
         "export_roles",
@@ -458,13 +456,11 @@ def get_command_safety_tier(command_name: str, *, selected_actions: set[str] | N
         return 1
     if command_name in {"restore_missing", "masschannels", "import_guild"}:
         return 2
-    if command_name in {"backup_load", "backupload"}:
+    if command_name == "backup_load":
         if selected_actions and {"delete_roles", "delete_channels"} & selected_actions:
             return 3
         return 2
-    if command_name == "cleantoday":
-        return 3 if destructive else 1
-    if command_name in {"leave", "safety_grant", "safety_revoke", "safety_list"}:
+    if command_name in {"leave", "safety_grant", "safety_revoke", "safety_list", "cleantoday"}:
         return 4
     return 1
 
@@ -486,7 +482,7 @@ def require_clinx_access(
         return "direct", tier, None
     if is_guild_owner(interaction.user, guild):
         return "direct", tier, None
-    if has_full_command_access(interaction.user.id, guild.id):
+    if has_full_command_access(interaction.user.id, guild.id) and tier < 4:
         return "direct", tier, None
     if tier == 4:
         return "deny", tier, "Only the actual server owner can use this command."
@@ -2918,15 +2914,12 @@ COMMAND_LIBRARY_LANES: tuple[CommandLibraryLane, ...] = (
         accent=0x4F8CFF,
         blurb="Snapshot, load, track, and manage recovery jobs.",
         entries=(
-            CommandLibraryEntry("/backup create", "Create a recovery snapshot of the current server.", "Captures channels, roles, overwrites, and server settings into a reusable backup ID.", "Private", ("/backupcreate",)),
-            CommandLibraryEntry("/backup load", "Load a backup with lane selection and live status.", "Opens the restore planner so you can choose what to rebuild before CLINX touches the target server.", "Private", ("/backupload",)),
-            CommandLibraryEntry("/backup list", "List only the backups owned by your account.", "Shows your stored backup codes with creation time so only your account can load or delete them.", "Private", ("/backuplist",)),
+            CommandLibraryEntry("/backup create", "Create a recovery snapshot of the current server.", "Captures channels, roles, overwrites, and server settings into a reusable backup ID.", "Private"),
+            CommandLibraryEntry("/backup load", "Load a backup with lane selection and live status.", "Opens the restore planner so you can choose what to rebuild before CLINX touches the target server.", "Private"),
+            CommandLibraryEntry("/backup list", "List only the backups owned by your account.", "Shows your stored backup codes with creation time so only your account can load or delete them.", "Private"),
             CommandLibraryEntry("/backup delete", "Remove a stored backup ID.", "Deletes a backup record from CLINX storage so it can no longer be loaded.", "Private"),
             CommandLibraryEntry("/backup status", "Inspect the current load job.", "Posts or refreshes the public live status card for the active restore job in this server.", "Public"),
             CommandLibraryEntry("/backup cancel", "Cancel the current backup load.", "Stops the active restore task for this server if one is running and updates the public live card.", "Public"),
-            CommandLibraryEntry("/backupcreate", "Alias for `/backup create`.", "Shortcut alias for creating a backup without using the group command.", "Private", ("/backup create",)),
-            CommandLibraryEntry("/backupload", "Alias for `/backup load`.", "Shortcut alias for opening the restore planner without using the group command.", "Private", ("/backup load",)),
-            CommandLibraryEntry("/backuplist", "Alias for `/backup list`.", "Shortcut alias for opening your personal backup list.", "Private", ("/backup list",)),
         ),
     ),
     CommandLibraryLane(
@@ -2937,7 +2930,7 @@ COMMAND_LIBRARY_LANES: tuple[CommandLibraryLane, ...] = (
         blurb="High-impact recovery, rebuild, and cleanup operations.",
         entries=(
             CommandLibraryEntry("/restore_missing", "Recreate only the missing structure from a source server.", "Creates categories and channels that do not exist yet without wiping the target.", "Public"),
-            CommandLibraryEntry("/cleantoday", "Delete channels created today.", "Useful for nuked test runs and bad imports. Dry-run unless `confirm=true` is supplied.", "Public"),
+            CommandLibraryEntry("/cleantoday", "Owner-only: delete channels created today.", "Useful for nuked test runs and bad imports. Dry-run unless `confirm=true` is supplied.", "Private"),
             CommandLibraryEntry("/masschannels", "Paste a layout and bulk-create the structure.", "Reads a copied category and channel layout, then recreates the structure in one pass.", "Public"),
             CommandLibraryEntry("/import guild", "Import a full server snapshot JSON file.", "Runs a structured import job from an exported guild snapshot file.", "Private"),
             CommandLibraryEntry("/import status", "Check the import job state.", "Returns running, finished, or failed status for the active import in this server.", "Private"),
@@ -2996,12 +2989,20 @@ def build_invite_url(app_id: int | None) -> str:
     return f"https://discord.com/oauth2/authorize?client_id={resolved_id}&permissions=8&integration_type=0&scope=bot+applications.commands"
 
 
+def emphasize_command_refs(text: str) -> str:
+    return re.sub(
+        r"(?<![`\\w])(/[a-z0-9_]+(?: [a-z0-9_]+)*)",
+        lambda match: f"**`{match.group(1)}`**",
+        text,
+    )
+
+
 def format_command_library_page(lane: CommandLibraryLane, page: int) -> tuple[str, int]:
     total_pages = max(1, (len(lane.entries) + COMMAND_LIBRARY_PAGE_SIZE - 1) // COMMAND_LIBRARY_PAGE_SIZE)
     safe_page = max(0, min(page, total_pages - 1))
     start = safe_page * COMMAND_LIBRARY_PAGE_SIZE
     entries = lane.entries[start : start + COMMAND_LIBRARY_PAGE_SIZE]
-    lines = [f"- `/{entry.path.lstrip('/')}` - {entry.summary}" for entry in entries]
+    lines = [f"- **`/{entry.path.lstrip('/')}`** - {entry.summary}" for entry in entries]
     return "\n".join(lines), total_pages
 
 
@@ -3014,12 +3015,12 @@ def format_command_library_detail(entry: CommandLibraryEntry | None) -> str:
 
     detail_lines = [
         f"**`/{entry.path.lstrip('/')}`**",
-        entry.detail,
+        emphasize_command_refs(entry.detail),
         "",
         f"**Visibility**: {entry.visibility}",
     ]
     if entry.aliases:
-        aliases = ", ".join(f"`{alias}`" for alias in entry.aliases)
+        aliases = ", ".join(f"**`{alias}`**" for alias in entry.aliases)
         detail_lines.append(f"**Aliases**: {aliases}")
     return "\n".join(detail_lines)
 
@@ -3167,7 +3168,6 @@ class ClinxBot(commands.Bot):
             self.tree.add_command(export_group)
             self.tree.add_command(import_group)
             self.tree.add_command(safety_group)
-            self.tree.add_command(access_group)
             self._groups_added = True
 
         if not self._startup_synced:
@@ -3182,7 +3182,6 @@ backup_group = app_commands.Group(name="backup", description="Backup and restore
 export_group = app_commands.Group(name="export", description="Export server objects")
 import_group = app_commands.Group(name="import", description="Import server objects")
 safety_group = app_commands.Group(name="safety", description="CLINX trust and approval controls")
-access_group = app_commands.Group(name="access", description="Developer-only CLINX access controls")
 
 
 @bot.event
@@ -3421,25 +3420,6 @@ async def backup_cancel(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=make_embed("Backup", "Cancel requested. The public live status card will update when the task stops.", EMBED_INFO), ephemeral=False)
 
 
-@bot.tree.command(name="backupcreate", description="Alias of /backup create")
-@app_commands.default_permissions(administrator=True)
-async def backupcreate_alias(interaction: discord.Interaction, source_guild_id: int | None = None) -> None:
-    await backup_create.callback(interaction, source_guild_id)
-
-
-@bot.tree.command(name="backupload", description="Alias of /backup load")
-@app_commands.autocomplete(load_id=backup_id_autocomplete)
-@app_commands.default_permissions(administrator=True)
-async def backupload_alias(interaction: discord.Interaction, load_id: str, target_guild_id: int | None = None) -> None:
-    await backup_load.callback(interaction, load_id, target_guild_id)
-
-
-@bot.tree.command(name="backuplist", description="Alias of /backup list")
-@app_commands.default_permissions(administrator=True)
-async def backuplist_alias(interaction: discord.Interaction) -> None:
-    await backup_list.callback(interaction)
-
-
 @bot.tree.command(name="restore_missing", description="Restore only missing categories/channels from source")
 @app_commands.describe(source_guild_id="Source guild ID", target_guild_id="Target guild ID")
 @app_commands.default_permissions(administrator=True)
@@ -3520,7 +3500,7 @@ async def restore_missing(interaction: discord.Interaction, source_guild_id: int
     )
 
 
-@bot.tree.command(name="cleantoday", description="Delete channels created today (UTC)")
+@bot.tree.command(name="cleantoday", description="Owner-only: delete channels created today (UTC)")
 @app_commands.default_permissions(administrator=True)
 async def cleantoday(interaction: discord.Interaction, confirm: bool = False) -> None:
     guild = interaction.guild
@@ -4023,69 +4003,6 @@ async def leave(interaction: discord.Interaction) -> None:
     await guild.leave()
 
 
-@bot.tree.command(name="deleteallroles", description="Developer only: delete every deletable role in this server")
-async def deleteallroles(interaction: discord.Interaction) -> None:
-    if not is_developer_user(interaction.user):
-        await send_access_denied(interaction, "This CLINX developer command is locked to the bot developer.")
-        return
-
-    guild = interaction.guild
-    if guild is None:
-        await interaction.response.send_message(embed=make_embed("Error", "Run this command inside a server.", EMBED_ERR, interaction), ephemeral=True)
-        return
-
-    me = guild.me
-    if me is None and bot.user is not None:
-        me = guild.get_member(bot.user.id)
-    if me is None:
-        await interaction.response.send_message(embed=make_embed("Error", "CLINX could not resolve its member state in this server.", EMBED_ERR, interaction), ephemeral=True)
-        return
-
-    deletable_roles: list[discord.Role] = []
-    blocked_roles: list[discord.Role] = []
-    for role in sorted(guild.roles, key=lambda item: item.position, reverse=True):
-        if role.is_default() or role.managed:
-            continue
-        if role >= me.top_role:
-            blocked_roles.append(role)
-            continue
-        deletable_roles.append(role)
-
-    if not deletable_roles and not blocked_roles:
-        await interaction.response.send_message(
-            embed=make_embed("Role Purge", "There are no deletable roles in this server.", EMBED_INFO, interaction),
-            ephemeral=True,
-        )
-        return
-
-    queued_lines = [f"Queued for deletion: `{len(deletable_roles)}`"]
-    if blocked_roles:
-        queued_lines.append(f"Blocked by role hierarchy: `{len(blocked_roles)}`")
-    await interaction.response.send_message(
-        embed=make_embed("Role Purge Started", "\n".join(queued_lines), EMBED_WARN, interaction),
-        ephemeral=True,
-    )
-
-    deleted = 0
-    failed = 0
-    for role in deletable_roles:
-        try:
-            await role.delete(reason=f"CLINX developer purge requested by {interaction.user} ({interaction.user.id})")
-            deleted += 1
-        except (discord.Forbidden, discord.HTTPException):
-            failed += 1
-
-    result_lines = [f"Deleted: `{deleted}`"]
-    if blocked_roles:
-        result_lines.append(f"Skipped by hierarchy: `{len(blocked_roles)}`")
-    if failed:
-        result_lines.append(f"Failed: `{failed}`")
-    color = EMBED_OK if failed == 0 else EMBED_WARN
-    await interaction.edit_original_response(
-        embed=make_embed("Role Purge Complete", "\n".join(result_lines), color, interaction),
-    )
-
-
 async def handle_access_grant(interaction: discord.Interaction, user: discord.Member) -> None:
     if not is_developer_user(interaction.user):
         await send_access_denied(interaction, "This developer access command is locked to the CLINX developer.")
@@ -4168,26 +4085,6 @@ async def send_temp_prefix_notice(
         await message.delete()
     except (discord.Forbidden, discord.HTTPException):
         return
-
-
-@access_group.command(name="grant", description="Developer only: grant full CLINX command access in this server")
-async def access_grant(interaction: discord.Interaction, user: discord.Member) -> None:
-    await handle_access_grant(interaction, user)
-
-
-@access_group.command(name="revoke", description="Developer only: revoke full CLINX command access in this server")
-async def access_revoke(interaction: discord.Interaction, user: discord.Member) -> None:
-    await handle_access_revoke(interaction, user)
-
-
-@bot.tree.command(name="accessgrant", description="Developer only: grant full CLINX command access in this server")
-async def accessgrant(interaction: discord.Interaction, user: discord.Member) -> None:
-    await handle_access_grant(interaction, user)
-
-
-@bot.tree.command(name="accessrevoke", description="Developer only: revoke full CLINX command access in this server")
-async def accessrevoke(interaction: discord.Interaction, user: discord.Member) -> None:
-    await handle_access_revoke(interaction, user)
 
 
 @bot.command(name="grant", hidden=True)
@@ -4328,6 +4225,86 @@ async def safety_list(interaction: discord.Interaction) -> None:
         ),
         ephemeral=True,
     )
+
+
+@bot.command(name="deleteallroles", hidden=True)
+async def dev_delete_all_roles(ctx: commands.Context) -> None:
+    if not is_developer_user(ctx.author):
+        return
+    if ctx.guild is None:
+        await send_temp_prefix_notice(ctx, "Role Purge Failed", "Run this in a server.", EMBED_ERR)
+        return
+
+    me = ctx.guild.me or (ctx.guild.get_member(bot.user.id) if bot.user else None)
+    if me is None:
+        await send_temp_prefix_notice(ctx, "Role Purge Failed", "CLINX could not resolve its member state in this server.", EMBED_ERR)
+        return
+
+    deletable_roles: list[discord.Role] = []
+    blocked_roles = 0
+    for role in sorted(ctx.guild.roles, key=lambda item: item.position, reverse=True):
+        if role.is_default() or role.managed:
+            continue
+        if role >= me.top_role:
+            blocked_roles += 1
+            continue
+        deletable_roles.append(role)
+
+    deleted = 0
+    failed = 0
+    for role in deletable_roles:
+        try:
+            await role.delete(reason=f"CLINX developer role purge by {ctx.author} ({ctx.author.id})")
+            deleted += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    result_lines = [f"Deleted: `{deleted}`"]
+    if blocked_roles:
+        result_lines.append(f"Blocked by hierarchy: `{blocked_roles}`")
+    if failed:
+        result_lines.append(f"Failed: `{failed}`")
+    await send_temp_prefix_notice(ctx, "Role Purge Complete", "\n".join(result_lines), EMBED_OK if failed == 0 else EMBED_WARN)
+
+
+@bot.command(name="deleteallchannels", hidden=True)
+async def dev_delete_all_channels(ctx: commands.Context) -> None:
+    if not is_developer_user(ctx.author):
+        return
+    if ctx.guild is None:
+        await send_temp_prefix_notice(ctx, "Channel Purge Failed", "Run this in a server.", EMBED_ERR)
+        return
+
+    guild = ctx.guild
+    me = guild.me or (guild.get_member(bot.user.id) if bot.user else None)
+    if me is None:
+        await send_temp_prefix_notice(ctx, "Channel Purge Failed", "CLINX could not resolve its member state in this server.", EMBED_ERR)
+        return
+
+    channels = [channel for channel in guild.channels if channel.permissions_for(me).manage_channels]
+    categories = [channel for channel in channels if isinstance(channel, discord.CategoryChannel)]
+    non_categories = [channel for channel in channels if not isinstance(channel, discord.CategoryChannel)]
+    deleted = 0
+    failed = 0
+
+    for channel in sorted(non_categories, key=lambda item: item.position, reverse=True):
+        try:
+            await channel.delete(reason=f"CLINX developer channel purge by {ctx.author} ({ctx.author.id})")
+            deleted += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    for category in sorted(categories, key=lambda item: item.position, reverse=True):
+        try:
+            await category.delete(reason=f"CLINX developer channel purge by {ctx.author} ({ctx.author.id})")
+            deleted += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    try:
+        await ctx.author.send(embed=make_embed("Channel Purge Complete", f"Deleted: `{deleted}`\nFailed: `{failed}`", EMBED_OK if failed == 0 else EMBED_WARN))
+    except (discord.Forbidden, discord.HTTPException):
+        pass
 
 
 @bot.command(name="kick", hidden=True)
