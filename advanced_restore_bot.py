@@ -59,17 +59,117 @@ def make_embed(
 def ensure_storage() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not BACKUP_FILE.exists():
-        BACKUP_FILE.write_text(json.dumps({"backups": {}}, indent=2), encoding="utf-8")
+        BACKUP_FILE.write_text(json.dumps({"backups": {}, "users": {}}, indent=2), encoding="utf-8")
+
+
+def normalize_backup_store(store: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    changed = False
+    if not isinstance(store.get("backups"), dict):
+        store["backups"] = {}
+        changed = True
+
+    rebuilt_users: dict[str, dict[str, Any]] = {}
+    for backup_id, record in list(store["backups"].items()):
+        if not isinstance(record, dict):
+            store["backups"][backup_id] = {"id": backup_id}
+            record = store["backups"][backup_id]
+            changed = True
+
+        if record.get("id") != backup_id:
+            record["id"] = backup_id
+            changed = True
+
+        owner_id = record.get("created_by_user_id")
+        if owner_id is not None:
+            owner_id = str(owner_id)
+            if record.get("created_by_user_id") != owner_id:
+                record["created_by_user_id"] = owner_id
+                changed = True
+
+            user_bucket = rebuilt_users.setdefault(
+                owner_id,
+                {
+                    "backup_ids": [],
+                    "display_name": record.get("created_by_display_name", "Unknown User"),
+                },
+            )
+            if backup_id not in user_bucket["backup_ids"]:
+                user_bucket["backup_ids"].append(backup_id)
+            if record.get("created_by_display_name"):
+                user_bucket["display_name"] = record["created_by_display_name"]
+
+    if store.get("users") != rebuilt_users:
+        store["users"] = rebuilt_users
+        changed = True
+
+    return store, changed
 
 
 def load_backup_store() -> dict[str, Any]:
     ensure_storage()
-    return json.loads(BACKUP_FILE.read_text(encoding="utf-8"))
+    store = json.loads(BACKUP_FILE.read_text(encoding="utf-8"))
+    store, changed = normalize_backup_store(store)
+    if changed:
+        save_backup_store(store)
+    return store
 
 
 def save_backup_store(store: dict[str, Any]) -> None:
     ensure_storage()
+    store, _ = normalize_backup_store(store)
     BACKUP_FILE.write_text(json.dumps(store, indent=2), encoding="utf-8")
+
+
+def format_backup_timestamp(created_at: str | None) -> str:
+    if not created_at:
+        return "Unknown time"
+    try:
+        dt = datetime.fromisoformat(created_at)
+    except ValueError:
+        return "Unknown time"
+    return dt.astimezone(timezone.utc).strftime("%d %b %Y - %H:%M UTC")
+
+
+def get_user_backup_entries(store: dict[str, Any], user_id: int) -> list[dict[str, Any]]:
+    owner_id = str(user_id)
+    backup_ids = store.get("users", {}).get(owner_id, {}).get("backup_ids", [])
+    entries = [store["backups"][backup_id] for backup_id in backup_ids if backup_id in store.get("backups", {})]
+    return sorted(entries, key=lambda entry: entry.get("created_at", ""), reverse=True)
+
+
+def can_access_backup(record: dict[str, Any], user_id: int) -> bool:
+    return str(record.get("created_by_user_id", "")) == str(user_id)
+
+
+def build_backup_choice_label(record: dict[str, Any]) -> str:
+    source_name = record.get("source_guild_name", "Unknown Source")
+    timestamp = format_backup_timestamp(record.get("created_at"))
+    label = f"{source_name} | {timestamp} ({record.get('id', 'unknown')})"
+    return label[:100]
+
+
+async def backup_id_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    store = load_backup_store()
+    entries = get_user_backup_entries(store, interaction.user.id)
+    query = current.casefold().strip()
+    choices: list[app_commands.Choice[str]] = []
+    for record in entries:
+        haystack = " ".join(
+            [
+                str(record.get("id", "")),
+                str(record.get("source_guild_name", "")),
+                format_backup_timestamp(record.get("created_at")),
+            ]
+        ).casefold()
+        if query and query not in haystack:
+            continue
+        choices.append(app_commands.Choice(name=build_backup_choice_label(record), value=record["id"]))
+        if len(choices) >= 25:
+            break
+    return choices
 
 
 def build_backup_load_status_description(job: dict[str, Any]) -> str:
@@ -705,12 +805,13 @@ COMMAND_LIBRARY_LANES: tuple[CommandLibraryLane, ...] = (
         entries=(
             CommandLibraryEntry("/backup create", "Create a recovery snapshot of the current server.", "Captures channels, roles, overwrites, and server settings into a reusable backup ID.", "Private", ("/backupcreate",)),
             CommandLibraryEntry("/backup load", "Load a backup with lane selection and live status.", "Opens the restore planner so you can choose what to rebuild before CLINX touches the target server.", "Private", ("/backupload",)),
-            CommandLibraryEntry("/backup list", "List the most recent saved backup IDs.", "Shows the stored backup codes that are currently available to load or delete.", "Private"),
+            CommandLibraryEntry("/backup list", "List only the backups owned by your account.", "Shows your stored backup codes with creation time so only your account can load or delete them.", "Private", ("/backuplist",)),
             CommandLibraryEntry("/backup delete", "Remove a stored backup ID.", "Deletes a backup record from CLINX storage so it can no longer be loaded.", "Private"),
             CommandLibraryEntry("/backup status", "Inspect the current load job.", "Returns the running state, route, and counters for the active restore job in this server.", "Private"),
             CommandLibraryEntry("/backup cancel", "Cancel the current backup load.", "Stops the active restore task for this server if one is running.", "Private"),
             CommandLibraryEntry("/backupcreate", "Alias for `/backup create`.", "Shortcut alias for creating a backup without using the group command.", "Private", ("/backup create",)),
             CommandLibraryEntry("/backupload", "Alias for `/backup load`.", "Shortcut alias for opening the restore planner without using the group command.", "Private", ("/backup load",)),
+            CommandLibraryEntry("/backuplist", "Alias for `/backup list`.", "Shortcut alias for opening your personal backup list.", "Private", ("/backup list",)),
         ),
     ),
     CommandLibraryLane(
@@ -1131,6 +1232,8 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
     store["backups"][backup_id] = {
         "id": backup_id,
         "created_at": utc_now_iso(),
+        "created_by_user_id": str(interaction.user.id),
+        "created_by_display_name": str(interaction.user),
         "source_guild_id": source.id,
         "source_guild_name": source.name,
         "snapshot": serialize_guild_snapshot(source),
@@ -1149,6 +1252,7 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
 
 @backup_group.command(name="load", description="Load backup by ID with action selection")
 @app_commands.describe(load_id="Backup load ID", target_guild_id="Target guild ID (optional)")
+@app_commands.autocomplete(load_id=backup_id_autocomplete)
 @app_commands.default_permissions(administrator=True)
 async def backup_load(interaction: discord.Interaction, load_id: str, target_guild_id: int | None = None) -> None:
     await interaction.response.defer(ephemeral=True, thinking=True)
@@ -1157,6 +1261,9 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
     record = store.get("backups", {}).get(load_id)
     if record is None:
         await interaction.followup.send(embed=make_embed("Invalid Load ID", "No backup found with that ID.", EMBED_ERR), ephemeral=True)
+        return
+    if not can_access_backup(record, interaction.user.id):
+        await interaction.followup.send(embed=make_embed("Access Denied", "That backup does not belong to your account.", EMBED_ERR), ephemeral=True)
         return
 
     target = interaction.guild if target_guild_id is None else bot.get_guild(target_guild_id)
@@ -1182,22 +1289,30 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
 @app_commands.default_permissions(administrator=True)
 async def backup_list(interaction: discord.Interaction) -> None:
     store = load_backup_store()
-    entries = list(store.get("backups", {}).values())[-20:]
+    entries = get_user_backup_entries(store, interaction.user.id)[:20]
     if not entries:
         await interaction.response.send_message(embed=make_embed("Backups", "No backups found.", EMBED_INFO), ephemeral=True)
         return
 
-    lines = [f"`{e['id']}` - {e.get('source_guild_name', 'unknown')}" for e in reversed(entries)]
+    lines: list[str] = []
+    for entry in entries:
+        lines.append(f"`{entry['id']}`")
+        lines.append(f"{entry.get('source_guild_name', 'Unknown Source')} - {format_backup_timestamp(entry.get('created_at'))}")
     await interaction.response.send_message(embed=make_embed("Backups", "\n".join(lines), EMBED_INFO), ephemeral=True)
 
 
 @backup_group.command(name="delete", description="Delete a backup ID")
 @app_commands.describe(load_id="Backup load ID")
+@app_commands.autocomplete(load_id=backup_id_autocomplete)
 @app_commands.default_permissions(administrator=True)
 async def backup_delete(interaction: discord.Interaction, load_id: str) -> None:
     store = load_backup_store()
-    if load_id not in store.get("backups", {}):
+    record = store.get("backups", {}).get(load_id)
+    if record is None:
         await interaction.response.send_message(embed=make_embed("Error", "Load ID not found.", EMBED_ERR), ephemeral=True)
+        return
+    if not can_access_backup(record, interaction.user.id):
+        await interaction.response.send_message(embed=make_embed("Access Denied", "That backup does not belong to your account.", EMBED_ERR), ephemeral=True)
         return
 
     del store["backups"][load_id]
@@ -1250,9 +1365,16 @@ async def backupcreate_alias(interaction: discord.Interaction, source_guild_id: 
 
 
 @bot.tree.command(name="backupload", description="Alias of /backup load")
+@app_commands.autocomplete(load_id=backup_id_autocomplete)
 @app_commands.default_permissions(administrator=True)
 async def backupload_alias(interaction: discord.Interaction, load_id: str, target_guild_id: int | None = None) -> None:
     await backup_load.callback(interaction, load_id, target_guild_id)
+
+
+@bot.tree.command(name="backuplist", description="Alias of /backup list")
+@app_commands.default_permissions(administrator=True)
+async def backuplist_alias(interaction: discord.Interaction) -> None:
+    await backup_list.callback(interaction)
 
 
 @bot.tree.command(name="restore_missing", description="Restore only missing categories/channels from source")
