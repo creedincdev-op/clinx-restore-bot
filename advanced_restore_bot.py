@@ -2441,20 +2441,20 @@ class BackupListCardView(discord.ui.LayoutView):
             return
 
         if selected_entry is None:
-            page_feed: list[str] = []
-            for entry in page_entries:
-                page_feed.extend(
+            page_feed_lines: list[str] = []
+            for index, entry in enumerate(page_entries, start=(self.page * BACKUP_VAULT_PAGE_SIZE) + 1):
+                page_feed_lines.extend(
                     [
-                        f"- `{entry.get('id', 'unknown')}`",
-                        f"  `{entry.get('source_guild_name', 'Unknown Source')}`",
-                        f"  `{format_backup_timestamp(entry.get('created_at'))}`",
+                        f"{index}. `{entry.get('id', 'unknown')}`",
+                        f"- Source: `{entry.get('source_guild_name', 'Unknown Source')}`",
+                        f"- Created: `{format_backup_timestamp(entry.get('created_at'))}`",
                     ]
                 )
             container = discord.ui.Container(
                 discord.ui.Section(
                     discord.ui.TextDisplay("## <> Backup Vault"),
                     discord.ui.TextDisplay(
-                        "Select one of your backups first. CLINX will open the full structure and role preview only after you choose a vault entry."
+                        "Private recovery IDs owned by your account are listed here."
                     ),
                     accessory=hero,
                 ),
@@ -2463,18 +2463,21 @@ class BackupListCardView(discord.ui.LayoutView):
                     discord.ui.TextDisplay("### Vault Feed"),
                     discord.ui.TextDisplay(
                         f"`{len(self.entries)}/{self.backup_limit}` private backups stored\n"
-                        f"Current page: `{self.page + 1}` / `{self.max_page_index + 1}`"
+                        "Select one backup ID ready for restore."
                     ),
                     accessory=count_badge,
                 ),
                 discord.ui.Section(
-                    discord.ui.TextDisplay("### Selection State"),
-                    discord.ui.TextDisplay("No backup is focused yet. Pick one from the selector below to unlock the full preview."),
+                    discord.ui.TextDisplay("### Your Backups"),
+                    discord.ui.TextDisplay(
+                        f"Current page: `{self.page + 1}` / `{self.max_page_index + 1}`\n"
+                        "Pick one from the selector below to unlock the saved structure preview."
+                    ),
                     accessory=vault_badge,
                 ),
                 discord.ui.TextDisplay(
-                    "### Page Feed\n"
-                    f"{chr(10).join(page_feed[:18]) if page_feed else '- No backups on this page.'}"
+                    "### Vault Page\n"
+                    f"{chr(10).join(page_feed_lines[:24]) if page_feed_lines else '- No backups on this page.'}"
                 ),
                 accent_color=EMBED_INFO,
             )
