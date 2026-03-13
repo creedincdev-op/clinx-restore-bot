@@ -1649,6 +1649,48 @@ class BackupListCardView(discord.ui.LayoutView):
         )
 
 
+class PingCardView(discord.ui.LayoutView):
+    def __init__(self, bot_user: discord.ClientUser | None, *, latency_ms: int) -> None:
+        super().__init__(timeout=None)
+        hero = (
+            discord.ui.Thumbnail(bot_user.display_avatar.url)
+            if bot_user
+            else discord.ui.Button(label="CLINX", disabled=True)
+        )
+        band_label = (
+            "Ultra Low" if latency_ms <= 80 else
+            "Stable" if latency_ms <= 160 else
+            "Elevated"
+        )
+        band_style = (
+            discord.ButtonStyle.success if latency_ms <= 80 else
+            discord.ButtonStyle.primary if latency_ms <= 160 else
+            discord.ButtonStyle.secondary
+        )
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.Section(
+                    discord.ui.TextDisplay("## <> CLINX Ping"),
+                    discord.ui.TextDisplay("Live gateway latency from the current bot session."),
+                    accessory=hero,
+                ),
+                discord.ui.Separator(),
+                discord.ui.Section(
+                    discord.ui.TextDisplay("### Gateway"),
+                    discord.ui.TextDisplay(f"`{latency_ms} ms`"),
+                    accessory=discord.ui.Button(label=band_label, style=band_style, disabled=True),
+                ),
+                discord.ui.TextDisplay(
+                    "### Readout\n"
+                    f"- Gateway heartbeat: `{latency_ms} ms`\n"
+                    f"- Session state: `online`\n"
+                    "- Use this as the quick check after deploys and restarts."
+                ),
+                accent_color=EMBED_INFO,
+            )
+        )
+
+
 class SafetyRosterCardView(discord.ui.LayoutView):
     def __init__(
         self,
@@ -2959,6 +3001,7 @@ class CommandLibraryView(discord.ui.LayoutView):
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
+intents.message_content = True
 
 
 class ClinxBot(commands.Bot):
@@ -3797,6 +3840,17 @@ async def invite(interaction: discord.Interaction) -> None:
     app_id = bot.user.id if bot.user else None
     link = build_invite_url(app_id)
     await interaction.response.send_message(embed=make_embed("Invite CLINX", link, EMBED_INFO), ephemeral=True)
+
+
+@bot.tree.command(name="ping", description="Check CLINX gateway latency")
+async def ping(interaction: discord.Interaction) -> None:
+    latency_ms = round(bot.latency * 1000)
+    await interaction.response.send_message(
+        view=PingCardView(
+            interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
+            latency_ms=latency_ms,
+        )
+    )
 
 
 @bot.tree.command(name="leave", description="Make bot leave this server")
