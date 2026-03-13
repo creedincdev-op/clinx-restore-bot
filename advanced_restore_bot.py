@@ -704,24 +704,144 @@ class BackupLoadStatusView(discord.ui.View):
         self.add_item(BackupLoadStatusButton(guild_id))
 
 
-class LoadActionSelect(discord.ui.Select):
-    def __init__(self, parent_view: "LoadConfirmView") -> None:
-        self.parent_view = parent_view
-        options = [
-            discord.SelectOption(label="Delete Roles", description="All existing roles will be deleted", value="delete_roles"),
-            discord.SelectOption(label="Delete Channels", description="All existing channels will be deleted", value="delete_channels"),
-            discord.SelectOption(label="Load Roles", description="Roles from backup will be loaded", value="load_roles", default=True),
-            discord.SelectOption(label="Load Channels", description="Channels from backup will be loaded", value="load_channels", default=True),
-            discord.SelectOption(label="Load Settings", description="Server settings will be updated", value="load_settings", default=True),
-        ]
-        super().__init__(placeholder="Select actions to perform", min_values=1, max_values=len(options), options=options)
+LOAD_ACTION_ORDER = (
+    "load_roles",
+    "load_channels",
+    "load_settings",
+    "delete_roles",
+    "delete_channels",
+)
 
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.parent_view.author_id:
-            await interaction.response.send_message("Only the command user can change this menu.", ephemeral=True)
-            return
-        self.parent_view.selected_actions = set(self.values)
-        await interaction.response.defer()
+LOAD_ACTION_LABELS = {
+    "load_roles": "Load Roles",
+    "load_channels": "Load Channels",
+    "load_settings": "Load Settings",
+    "delete_roles": "Delete Roles",
+    "delete_channels": "Delete Channels",
+}
+
+
+def summarize_selected_actions(selected_actions: set[str]) -> str:
+    ordered = [LOAD_ACTION_LABELS[action] for action in LOAD_ACTION_ORDER if action in selected_actions]
+    return ", ".join(ordered) if ordered else "No active lanes"
+
+
+def build_backup_plan_preview(
+    snapshot: dict[str, Any],
+    target: discord.Guild,
+    selected_actions: set[str],
+) -> dict[str, int]:
+    target_roles = [role for role in target.roles if not role.managed and not role.is_default()]
+    snapshot_roles = snapshot.get("roles", [])
+    snapshot_categories = snapshot.get("categories", [])
+    snapshot_channels = snapshot.get("channels", [])
+    target_categories = list(target.categories)
+    target_channels = list(target.channels)
+    target_role_names = {role.name for role in target_roles}
+    target_category_names = {category.name for category in target_categories}
+    target_channel_names = {channel.name for channel in target_channels}
+
+    preview = {
+        "deleted_roles": len(target_roles) if "delete_roles" in selected_actions else 0,
+        "deleted_channels": len(target_channels) if "delete_channels" in selected_actions else 0,
+        "created_roles": 0,
+        "updated_roles": 0,
+        "created_categories": 0,
+        "created_channels": 0,
+        "updated_channels": 0,
+        "updated_settings": 1 if "load_settings" in selected_actions else 0,
+    }
+
+    if "load_roles" in selected_actions:
+        if "delete_roles" in selected_actions:
+            preview["created_roles"] = len(snapshot_roles)
+        else:
+            preview["created_roles"] = sum(1 for role in snapshot_roles if role.get("name") not in target_role_names)
+            preview["updated_roles"] = sum(1 for role in snapshot_roles if role.get("name") in target_role_names)
+
+    if "load_channels" in selected_actions:
+        if "delete_channels" in selected_actions:
+            preview["created_categories"] = len(snapshot_categories)
+            preview["created_channels"] = len(snapshot_channels)
+        else:
+            preview["created_categories"] = sum(1 for category in snapshot_categories if category.get("name") not in target_category_names)
+            preview["created_channels"] = sum(1 for channel in snapshot_channels if channel.get("name") not in target_channel_names)
+            preview["updated_channels"] = sum(1 for channel in snapshot_channels if channel.get("name") in target_channel_names)
+
+    return preview
+
+
+def build_backup_planner_embed(
+    interaction: discord.Interaction | None,
+    backup_id: str,
+    source_name: str,
+    target_name: str,
+    selected_actions: set[str],
+    snapshot: dict[str, Any],
+    target: discord.Guild,
+    *,
+    review_mode: bool,
+) -> discord.Embed:
+    preview = build_backup_plan_preview(snapshot, target, selected_actions)
+    lane_lines = []
+    if "load_roles" in selected_actions:
+        lane_lines.append("- **Roles**: merge or rebuild the role stack from backup")
+    if "load_channels" in selected_actions:
+        lane_lines.append("- **Channels**: rebuild categories and channels from backup")
+    if "load_settings" in selected_actions:
+        lane_lines.append("- **Settings**: sync guild-level configuration")
+    if "delete_roles" in selected_actions:
+        lane_lines.append("- **Role Wipe**: delete live roles before rebuilding them")
+    if "delete_channels" in selected_actions:
+        lane_lines.append("- **Channel Wipe**: delete live channels before rebuilding them")
+    if not lane_lines:
+        lane_lines.append("- Enable at least one rebuild lane to continue.")
+
+    delete_lines = []
+    if preview["deleted_roles"]:
+        delete_lines.append(f"- `{preview['deleted_roles']}` roles will be deleted")
+    if preview["deleted_channels"]:
+        delete_lines.append(f"- `{preview['deleted_channels']}` channels will be deleted")
+    if not delete_lines:
+        delete_lines.append("- No destructive deletes are armed")
+
+    build_lines = []
+    if preview["created_roles"]:
+        build_lines.append(f"- `{preview['created_roles']}` roles will be created")
+    if preview["updated_roles"]:
+        build_lines.append(f"- `{preview['updated_roles']}` roles will be updated")
+    if preview["created_categories"]:
+        build_lines.append(f"- `{preview['created_categories']}` categories will be created")
+    if preview["created_channels"]:
+        build_lines.append(f"- `{preview['created_channels']}` channels will be created")
+    if preview["updated_channels"]:
+        build_lines.append(f"- `{preview['updated_channels']}` channels will be updated")
+    if preview["updated_settings"]:
+        build_lines.append("- Server settings will be synced")
+    if not build_lines:
+        build_lines.append("- No rebuild actions are armed")
+
+    title = "Backup Apply Review" if review_mode else "Backup Load Planner"
+    color = EMBED_OK if review_mode else EMBED_INFO
+    intro = (
+        "Review the exact delete and rebuild plan below, then apply it."
+        if review_mode
+        else "Pick the restore lanes first. CLINX will show the exact impact before anything starts."
+    )
+
+    description = (
+        f"{intro}\n\n"
+        f"**Backup Vault**\n`{backup_id}`\n\n"
+        f"**Route**\n`{source_name}` -> `{target_name}`\n\n"
+        f"**Active Lanes**\n{chr(10).join(lane_lines)}\n\n"
+        f"**Projected Deletes**\n{chr(10).join(delete_lines)}\n\n"
+        f"**Projected Build**\n{chr(10).join(build_lines)}\n\n"
+        "**Guardrails**\n"
+        "- Delete Roles is only available while Load Roles is active.\n"
+        "- Delete Channels is only available while Load Channels is active.\n"
+        "- Delete-only runs are not allowed."
+    )
+    return make_embed(title, description, color, interaction)
 
 
 class LoadConfirmView(discord.ui.View):
@@ -733,7 +853,8 @@ class LoadConfirmView(discord.ui.View):
         self.snapshot = snapshot
         self.target = target
         self.selected_actions: set[str] = {"load_roles", "load_channels", "load_settings"}
-        self.add_item(LoadActionSelect(self))
+        self.review_mode = False
+        self.rebuild_items()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -741,8 +862,123 @@ class LoadConfirmView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Continue", style=discord.ButtonStyle.success)
-    async def continue_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    def rebuild_items(self) -> None:
+        self.clear_items()
+        if self.review_mode:
+            self.add_item(self._make_apply_button())
+            self.add_item(self._make_back_button())
+            self.add_item(self._make_cancel_button())
+            return
+
+        self.add_item(self._make_toggle_button("load_roles"))
+        self.add_item(self._make_toggle_button("load_channels"))
+        self.add_item(self._make_toggle_button("load_settings"))
+        self.add_item(self._make_toggle_button("delete_roles"))
+        self.add_item(self._make_toggle_button("delete_channels"))
+        self.add_item(self._make_continue_button())
+        self.add_item(self._make_cancel_button())
+
+    def _make_toggle_button(self, action: str) -> discord.ui.Button:
+        selected = action in self.selected_actions
+        destructive = action.startswith("delete_")
+        enabled = True
+        if action == "delete_roles" and "load_roles" not in self.selected_actions:
+            enabled = False
+        if action == "delete_channels" and "load_channels" not in self.selected_actions:
+            enabled = False
+
+        if destructive:
+            style = discord.ButtonStyle.danger if selected else discord.ButtonStyle.secondary
+        else:
+            style = discord.ButtonStyle.success if selected else discord.ButtonStyle.secondary
+
+        button = discord.ui.Button(
+            label=LOAD_ACTION_LABELS[action],
+            style=style,
+            disabled=not enabled,
+            row=0 if action.startswith("load_") else 1,
+        )
+
+        async def callback(interaction: discord.Interaction) -> None:
+            if action in {"delete_roles", "delete_channels"} and not enabled:
+                await interaction.response.send_message("Enable the matching rebuild lane first.", ephemeral=True)
+                return
+
+            if action in self.selected_actions:
+                self.selected_actions.remove(action)
+            else:
+                self.selected_actions.add(action)
+
+            if action == "load_roles" and "load_roles" not in self.selected_actions:
+                self.selected_actions.discard("delete_roles")
+            if action == "load_channels" and "load_channels" not in self.selected_actions:
+                self.selected_actions.discard("delete_channels")
+
+            self.review_mode = False
+            self.rebuild_items()
+            await interaction.response.edit_message(embed=self.build_embed(interaction), view=self)
+
+        button.callback = callback
+        return button
+
+    def _make_continue_button(self) -> discord.ui.Button:
+        has_rebuild_lane = any(action in self.selected_actions for action in ("load_roles", "load_channels", "load_settings"))
+        button = discord.ui.Button(label="Continue", style=discord.ButtonStyle.success, disabled=not has_rebuild_lane, row=2)
+
+        async def callback(interaction: discord.Interaction) -> None:
+            self.review_mode = True
+            self.rebuild_items()
+            await interaction.response.edit_message(embed=self.build_embed(interaction), view=self)
+
+        button.callback = callback
+        return button
+
+    def _make_back_button(self) -> discord.ui.Button:
+        button = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary, row=2)
+
+        async def callback(interaction: discord.Interaction) -> None:
+            self.review_mode = False
+            self.rebuild_items()
+            await interaction.response.edit_message(embed=self.build_embed(interaction), view=self)
+
+        button.callback = callback
+        return button
+
+    def _make_apply_button(self) -> discord.ui.Button:
+        button = discord.ui.Button(label="Apply Backup", style=discord.ButtonStyle.primary, row=2)
+
+        async def callback(interaction: discord.Interaction) -> None:
+            await self.start_backup_load(interaction)
+
+        button.callback = callback
+        return button
+
+    def _make_cancel_button(self) -> discord.ui.Button:
+        button = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.danger, row=2)
+
+        async def callback(interaction: discord.Interaction) -> None:
+            await interaction.response.edit_message(
+                embed=make_embed("Cancelled", "Backup load was cancelled.", EMBED_WARN, interaction),
+                view=None,
+            )
+            self.stop()
+
+        button.callback = callback
+        return button
+
+    def build_embed(self, interaction: discord.Interaction | None = None) -> discord.Embed:
+        return build_backup_planner_embed(
+            interaction,
+            self.backup_id,
+            self.source_name,
+            self.target.name,
+            self.selected_actions,
+            self.snapshot,
+            self.target,
+            review_mode=self.review_mode,
+        )
+
+    async def start_backup_load(self, interaction: discord.Interaction) -> None:
         existing_job = BACKUP_LOAD_JOBS.get(self.target.id)
         if existing_job and existing_job.get("status") == "running":
             await interaction.response.send_message(
@@ -782,17 +1018,10 @@ class LoadConfirmView(discord.ui.View):
             view=BackupLoadStatusView(self.target.id),
         )
         self.stop()
+
     async def on_timeout(self) -> None:
         for child in self.children:
             child.disabled = True
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
-    async def cancel_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await interaction.response.edit_message(
-            embed=make_embed("Cancelled", "Backup load was cancelled.", EMBED_WARN, interaction),
-            view=None,
-        )
-        self.stop()
 
 
 COMMAND_LIBRARY_LANES: tuple[CommandLibraryLane, ...] = (
@@ -1271,10 +1500,6 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
         await interaction.followup.send(embed=make_embed("Error", "Target guild not found.", EMBED_ERR), ephemeral=True)
         return
 
-    warning = (
-        "Select what CLINX should load from this backup.\n"
-        "Use the menu, then press Continue."
-    )
     view = LoadConfirmView(
         interaction.user.id,
         load_id,
@@ -1282,7 +1507,7 @@ async def backup_load(interaction: discord.Interaction, load_id: str, target_gui
         record["snapshot"],
         target,
     )
-    await interaction.followup.send(embed=make_embed("Warning", warning, EMBED_WARN), view=view, ephemeral=True)
+    await interaction.followup.send(embed=view.build_embed(interaction), view=view, ephemeral=True)
 
 
 @backup_group.command(name="list", description="List saved backup IDs")
