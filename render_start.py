@@ -14,16 +14,23 @@ STATE_FILE = Path(__file__).with_name("data") / "render_runtime_state.json"
 
 
 class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:
+    def _send_health(self, include_body: bool) -> None:
         if self.path in ("/", "/healthz"):
             body = json.dumps({"ok": True}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if include_body:
+                self.wfile.write(body)
             return
         self.send_error(404)
+
+    def do_GET(self) -> None:
+        self._send_health(include_body=True)
+
+    def do_HEAD(self) -> None:
+        self._send_health(include_body=False)
 
     def log_message(self, format: str, *args) -> None:
         return
