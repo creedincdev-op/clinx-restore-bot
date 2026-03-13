@@ -575,7 +575,7 @@ async def apply_snapshot_to_guild(
             try:
                 await role.delete(reason="CLINX backup load: delete roles")
                 result["deleted_roles"] += 1
-            except discord.Forbidden:
+            except (discord.Forbidden, discord.HTTPException):
                 pass
 
     if load_roles and not create_only_missing:
@@ -599,7 +599,7 @@ async def apply_snapshot_to_guild(
                     existing_roles[role_data["name"]] = created_role
                     role_order.append((created_role, int(role_data.get("position", created_role.position))))
                     result["created_roles"] += 1
-                except discord.Forbidden:
+                except (discord.Forbidden, discord.HTTPException):
                     pass
             else:
                 try:
@@ -612,7 +612,7 @@ async def apply_snapshot_to_guild(
                     )
                     role_order.append((role, int(role_data.get("position", role.position))))
                     result["updated_roles"] += 1
-                except discord.Forbidden:
+                except (discord.Forbidden, discord.HTTPException):
                     pass
 
         bot_member = target.me
@@ -626,7 +626,7 @@ async def apply_snapshot_to_guild(
             if position_map:
                 try:
                     await target.edit_role_positions(position_map)
-                except discord.Forbidden:
+                except (discord.Forbidden, discord.HTTPException):
                     pass
 
     if load_channels:
@@ -930,11 +930,11 @@ def build_backup_plan_preview(
 
 def build_backup_lane_lines(selected_actions: set[str]) -> list[str]:
     return [
-        f"- **Load Roles**: {'ON' if 'load_roles' in selected_actions else 'OFF'}",
-        f"- **Load Channels**: {'ON' if 'load_channels' in selected_actions else 'OFF'}",
-        f"- **Load Settings**: {'ON' if 'load_settings' in selected_actions else 'OFF'}",
-        f"- **Delete Roles**: {'ON' if 'delete_roles' in selected_actions else 'OFF'}",
-        f"- **Delete Channels**: {'ON' if 'delete_channels' in selected_actions else 'OFF'}",
+        f"- **Load Roles**: {'ON' if 'load_roles' in selected_actions else 'OFF'} - restore role stack from backup",
+        f"- **Load Channels**: {'ON' if 'load_channels' in selected_actions else 'OFF'} - restore categories and channels",
+        f"- **Load Settings**: {'ON' if 'load_settings' in selected_actions else 'OFF'} - sync server profile and config",
+        f"- **Delete Roles**: {'ON' if 'delete_roles' in selected_actions else 'OFF'} - wipe live roles before rebuild",
+        f"- **Delete Channels**: {'ON' if 'delete_channels' in selected_actions else 'OFF'} - wipe live channels before rebuild",
     ]
 
 
@@ -1050,7 +1050,7 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
         self.snapshot = snapshot
         self.target = target
         self.bot_user = bot_user
-        self.selected_actions: set[str] = {"load_roles", "load_channels", "load_settings"}
+        self.selected_actions: set[str] = {"load_roles", "load_channels", "load_settings", "delete_roles", "delete_channels"}
         self.review_mode = False
         self.detail_mode = False
         self.rebuild()
@@ -1062,9 +1062,8 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
         return True
 
     def normalize_actions(self) -> None:
-        if "load_roles" not in self.selected_actions:
+        if "load_roles" not in self.selected_actions or "load_channels" not in self.selected_actions:
             self.selected_actions.discard("delete_roles")
-        if "load_channels" not in self.selected_actions:
             self.selected_actions.discard("delete_channels")
 
     def rebuild(self) -> None:
@@ -1115,9 +1114,10 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
             style=discord.ButtonStyle.secondary,
             disabled=True,
         )
+        destructive = {"delete_roles", "delete_channels"} & self.selected_actions
         route_badge = discord.ui.Button(
-            label="Wipe + Rebuild" if {"delete_roles", "delete_channels"} & self.selected_actions else "Merge + Rebuild",
-            style=discord.ButtonStyle.secondary,
+            label="Destructive" if destructive else "Merge Only",
+            style=discord.ButtonStyle.danger if destructive else discord.ButtonStyle.secondary,
             disabled=True,
         )
         lane_lines = build_backup_lane_lines(self.selected_actions)
@@ -1146,8 +1146,8 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
             discord.ui.TextDisplay(f"### Restore Lanes\n{chr(10).join(lane_lines)}"),
             discord.ui.TextDisplay(
                 "### Safety Locks\n"
-                "- Delete Roles only unlocks while Load Roles is active.\n"
-                "- Delete Channels only unlocks while Load Channels is active.\n"
+                "- Delete Roles and Delete Channels stay armed only when both Load Roles and Load Channels are active.\n"
+                "- Turning either rebuild lane off drops both destructive lanes.\n"
                 "- Delete-only runs are blocked."
             ),
         ]
@@ -1193,15 +1193,15 @@ class BackupLoadPlannerView(discord.ui.LayoutView):
                 ]
             )
 
-        accent = EMBED_WARN if self.review_mode else 0x5B8CFF
+        accent = EMBED_WARN if destructive else (EMBED_WARN if self.review_mode else 0x5B8CFF)
         return discord.ui.Container(*children, accent_color=accent)
 
     def _make_toggle_button(self, action: str) -> discord.ui.Button:
         selected = action in self.selected_actions
         destructive = action.startswith("delete_")
         enabled = not (
-            (action == "delete_roles" and "load_roles" not in self.selected_actions)
-            or (action == "delete_channels" and "load_channels" not in self.selected_actions)
+            action in {"delete_roles", "delete_channels"}
+            and ("load_roles" not in self.selected_actions or "load_channels" not in self.selected_actions)
         )
         style = discord.ButtonStyle.danger if destructive and selected else (
             discord.ButtonStyle.success if selected else discord.ButtonStyle.secondary
