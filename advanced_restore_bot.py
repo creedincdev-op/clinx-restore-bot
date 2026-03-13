@@ -204,7 +204,7 @@ def build_progress_bar(percent: int, *, width: int = 12) -> str:
     return f"[{'█' * filled}{'░' * (width - filled)}]"
 
 
-def build_transit_meter(percent: int, *, width: int = 14) -> str:
+def build_transit_meter(percent: int, *, width: int = 44) -> str:
     safe_percent = max(0, min(100, percent))
     filled = round((safe_percent / 100) * width)
     rail = ["━"] * width
@@ -252,6 +252,16 @@ def get_backup_progress_state(job: dict[str, Any]) -> tuple[int, str, int, int]:
     if status == "completed":
         percent = 100
     return percent, build_transit_meter(percent), min(index + 1, len(phases)), len(phases)
+
+
+async def run_limited(tasks: list[Any], *, limit: int = 6) -> list[Any]:
+    semaphore = asyncio.Semaphore(limit)
+
+    async def runner(coro: Any) -> Any:
+        async with semaphore:
+            return await coro
+
+    return await asyncio.gather(*(runner(task) for task in tasks))
 
 
 async def backup_id_autocomplete(
@@ -842,13 +852,23 @@ async def apply_snapshot_to_guild(
 
     if delete_roles and not create_only_missing:
         await report("Wiping Roles", "Clearing live roles so the backup stack can be rebuilt cleanly.")
-        for role in sorted(target.roles, key=lambda r: r.position, reverse=True):
-            if role.managed or role.is_default():
-                continue
+        roles_to_delete = [
+            role for role in sorted(target.roles, key=lambda r: r.position, reverse=True)
+            if not role.managed and not role.is_default()
+        ]
+
+        async def delete_role(role: discord.Role) -> tuple[str, discord.Role]:
             try:
                 await role.delete(reason="CLINX backup load: delete roles")
-                result["deleted_roles"] += 1
+                return ("deleted", role)
             except (discord.Forbidden, discord.HTTPException):
+                return ("blocked", role)
+
+        role_delete_results = await run_limited([delete_role(role) for role in roles_to_delete], limit=8)
+        for status_name, _ in role_delete_results:
+            if status_name == "deleted":
+                result["deleted_roles"] += 1
+            else:
                 result["blocked_roles"] += 1
 
     if load_roles and not create_only_missing:
@@ -859,16 +879,19 @@ async def apply_snapshot_to_guild(
                 if live_role.is_default() or live_role.managed:
                     continue
                 existing_roles.setdefault(live_role.name, []).append(live_role)
-        role_order: list[tuple[discord.Role, int]] = []
+        assigned_roles: list[tuple[dict[str, Any], discord.Role | None]] = []
         for role_data in sorted(snapshot.get("roles", []), key=lambda r: r.get("position", 0)):
-            role: discord.Role | None = None
+            assigned_role: discord.Role | None = None
             if not delete_roles:
                 bucket = existing_roles.get(role_data["name"], [])
                 if bucket:
-                    role = bucket.pop(0)
+                    assigned_role = bucket.pop(0)
+            assigned_roles.append((role_data, assigned_role))
+
+        async def sync_role(role_data: dict[str, Any], role: discord.Role | None) -> tuple[str, discord.Role | None, int]:
             permissions = discord.Permissions(role_data.get("permissions", 0))
             color = discord.Colour(role_data.get("color", 0))
-
+            desired_position = int(role_data.get("position", role.position if role is not None else 1))
             if role is None:
                 try:
                     created_role = await target.create_role(
@@ -879,32 +902,39 @@ async def apply_snapshot_to_guild(
                         mentionable=role_data.get("mentionable", False),
                         reason="CLINX backup load: create role",
                     )
-                    role_order.append((created_role, int(role_data.get("position", created_role.position))))
-                    result["created_roles"] += 1
+                    return ("created", created_role, desired_position)
                 except (discord.Forbidden, discord.HTTPException, AttributeError):
-                    result["blocked_roles"] += 1
+                    return ("blocked", None, desired_position)
+            try:
+                await role.edit(
+                    permissions=permissions,
+                    colour=color,
+                    hoist=role_data.get("hoist", False),
+                    mentionable=role_data.get("mentionable", False),
+                    reason="CLINX backup load: update role",
+                )
+                return ("updated", role, desired_position)
+            except (discord.Forbidden, discord.HTTPException, AttributeError):
+                return ("blocked", role, desired_position)
+
+        role_results = await run_limited([sync_role(role_data, role) for role_data, role in assigned_roles], limit=8)
+        role_order: list[discord.Role] = []
+        for status_name, role, _desired_position in role_results:
+            if status_name == "created" and role is not None:
+                result["created_roles"] += 1
+                role_order.append(role)
+            elif status_name == "updated" and role is not None:
+                result["updated_roles"] += 1
+                role_order.append(role)
             else:
-                try:
-                    await role.edit(
-                        permissions=permissions,
-                        colour=color,
-                        hoist=role_data.get("hoist", False),
-                        mentionable=role_data.get("mentionable", False),
-                        reason="CLINX backup load: update role",
-                    )
-                    role_order.append((role, int(role_data.get("position", role.position))))
-                    result["updated_roles"] += 1
-                except (discord.Forbidden, discord.HTTPException, AttributeError):
-                    result["blocked_roles"] += 1
+                result["blocked_roles"] += 1
 
         bot_member = target.me
         if role_order and bot_member is not None:
-            max_position = max(1, bot_member.top_role.position - 1)
-            manageable_roles = [item for item in role_order if item[0] < bot_member.top_role]
-            manageable_roles.sort(key=lambda item: item[1])
+            manageable_roles = [role for role in role_order if role < bot_member.top_role]
             position_map: dict[discord.Role, int] = {}
-            for slot, (role, _) in enumerate(manageable_roles, start=1):
-                position_map[role] = min(slot, max_position)
+            for slot, role in enumerate(manageable_roles, start=1):
+                position_map[role] = slot
             if position_map:
                 try:
                     await target.edit_role_positions(position_map)
@@ -943,7 +973,33 @@ async def apply_snapshot_to_guild(
 
             category_map[cat_data["name"]] = existing
 
+        category_edit_tasks: list[Any] = []
+        for cat_data in snapshot.get("categories", []):
+            existing = category_map.get(cat_data["name"])
+            if existing is None or create_only_missing:
+                continue
+            overwrites = deserialize_overwrites(
+                cat_data.get("overwrites", []),
+                target,
+                role_id_index=role_id_index,
+                role_name_index=role_name_index,
+                member_id_index=member_id_index,
+            )
+
+            async def edit_category(category: discord.CategoryChannel, payload: dict[str, Any], category_overwrites: dict[Any, discord.PermissionOverwrite]) -> bool:
+                try:
+                    await category.edit(overwrites=category_overwrites, position=payload.get("position", category.position))
+                    return True
+                except (discord.Forbidden, discord.HTTPException, AttributeError):
+                    return False
+
+            category_edit_tasks.append(edit_category(existing, cat_data, overwrites))
+
+        if category_edit_tasks:
+            await run_limited(category_edit_tasks, limit=12)
+
         existing_channels = {} if delete_channels else {live_channel_signature(channel): channel for channel in target.channels}
+        channel_edit_tasks: list[Any] = []
         for ch_data in snapshot.get("channels", []):
             channel_key = snapshot_channel_signature(ch_data)
             existing = precreated_channels.get(channel_key) or existing_channels.get(channel_key)
@@ -983,28 +1039,42 @@ async def apply_snapshot_to_guild(
             if create_only_missing:
                 continue
 
-            try:
-                if isinstance(existing, discord.TextChannel) and ch_data["type"] == "text":
-                    await existing.edit(
-                        category=category,
-                        topic=ch_data.get("topic"),
-                        slowmode_delay=ch_data.get("slowmode_delay", 0),
-                        nsfw=ch_data.get("nsfw", False),
-                        overwrites=overwrites,
-                    )
-                    if channel_key not in precreated_channels:
-                        result["updated_channels"] += 1
-                elif isinstance(existing, discord.VoiceChannel) and ch_data["type"] == "voice":
-                    await existing.edit(
-                        category=category,
-                        bitrate=ch_data.get("bitrate", existing.bitrate),
-                        user_limit=ch_data.get("user_limit", 0),
-                        overwrites=overwrites,
-                    )
-                    if channel_key not in precreated_channels:
-                        result["updated_channels"] += 1
-            except (discord.Forbidden, discord.HTTPException, AttributeError):
-                pass
+            async def edit_existing_channel(
+                live_channel: discord.abc.GuildChannel,
+                payload: dict[str, Any],
+                target_category: discord.CategoryChannel | None,
+                channel_overwrites: dict[Any, discord.PermissionOverwrite],
+                precreated: bool,
+            ) -> bool:
+                try:
+                    if isinstance(live_channel, discord.TextChannel) and payload["type"] == "text":
+                        await live_channel.edit(
+                            category=target_category,
+                            topic=payload.get("topic"),
+                            slowmode_delay=payload.get("slowmode_delay", 0),
+                            nsfw=payload.get("nsfw", False),
+                            overwrites=channel_overwrites,
+                        )
+                        return not precreated
+                    if isinstance(live_channel, discord.VoiceChannel) and payload["type"] == "voice":
+                        await live_channel.edit(
+                            category=target_category,
+                            bitrate=payload.get("bitrate", live_channel.bitrate),
+                            user_limit=payload.get("user_limit", 0),
+                            overwrites=channel_overwrites,
+                        )
+                        return not precreated
+                except (discord.Forbidden, discord.HTTPException, AttributeError):
+                    return False
+                return False
+
+            channel_edit_tasks.append(
+                edit_existing_channel(existing, ch_data, category, overwrites, channel_key in precreated_channels)
+            )
+
+        if channel_edit_tasks:
+            channel_edit_results = await run_limited(channel_edit_tasks, limit=16)
+            result["updated_channels"] += sum(1 for updated in channel_edit_results if updated)
 
     if load_settings and not create_only_missing:
         await report("Syncing Server Settings", "Applying the saved profile, visuals, and moderation defaults.")
@@ -1046,12 +1116,56 @@ async def apply_snapshot_to_guild(
             if key in settings:
                 profile_kwargs[key] = resolve_channel_reference(target, reference)
 
-        if profile_kwargs:
+        async def apply_setting_payload(payload: dict[str, Any], *, reason_suffix: str) -> bool:
+            if not payload:
+                return False
             try:
-                await target.edit(reason="CLINX backup load: update settings", **profile_kwargs)
+                await target.edit(reason=f"CLINX backup load: {reason_suffix}", **payload)
                 result["updated_settings"] += 1
+                return True
             except (discord.Forbidden, discord.HTTPException, AttributeError):
-                pass
+                return False
+
+        await apply_setting_payload(
+            {key: profile_kwargs[key] for key in ("name",) if key in profile_kwargs},
+            reason_suffix="update server name",
+        )
+        await apply_setting_payload(
+            {key: profile_kwargs[key] for key in ("description",) if key in profile_kwargs},
+            reason_suffix="update server description",
+        )
+        await apply_setting_payload(
+            {
+                key: value
+                for key, value in profile_kwargs.items()
+                if key
+                in {
+                    "verification_level",
+                    "default_notifications",
+                    "explicit_content_filter",
+                    "afk_timeout",
+                    "preferred_locale",
+                    "premium_progress_bar_enabled",
+                    "widget_enabled",
+                }
+            },
+            reason_suffix="update moderation defaults",
+        )
+        await apply_setting_payload(
+            {key: profile_kwargs[key] for key in ("system_channel_flags",) if key in profile_kwargs},
+            reason_suffix="update system channel flags",
+        )
+        for key in (
+            "afk_channel",
+            "system_channel",
+            "rules_channel",
+            "public_updates_channel",
+            "safety_alerts_channel",
+            "widget_channel",
+        ):
+            if key not in profile_kwargs:
+                continue
+            await apply_setting_payload({key: profile_kwargs[key]}, reason_suffix=f"update {key}")
 
         asset_keys = (
             ("icon", "icon_image"),
@@ -1473,16 +1587,21 @@ class BackupListCardView(discord.ui.LayoutView):
                 f"- Created: `{format_backup_timestamp(entry.get('created_at'))}`"
             )
         vault_summary = "No private backups are ready yet."
+        top_line = "Private recovery IDs owned by your account are listed here."
         if newest_entry is not None:
             vault_summary = (
                 f"Newest ID: `{newest_entry['id']}`\n"
                 f"Latest Source: `{newest_entry.get('source_guild_name', 'Unknown Source')}`"
             )
+            top_line = (
+                "Private recovery IDs owned by your account are listed here.\n"
+                f"Latest vault route: `{newest_entry.get('source_guild_name', 'Unknown Source')}` -> ready to load."
+            )
         self.add_item(
             discord.ui.Container(
                 discord.ui.Section(
                     discord.ui.TextDisplay("## <> Backup Vault"),
-                    discord.ui.TextDisplay("Private recovery IDs owned by your account are listed here.\nUse `/backup load` to open the restore planner."),
+                    discord.ui.TextDisplay(f"{top_line}\nUse `/backup load` to open the restore planner."),
                     accessory=hero,
                 ),
                 discord.ui.Separator(),
