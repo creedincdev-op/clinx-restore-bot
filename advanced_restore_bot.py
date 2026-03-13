@@ -19,6 +19,7 @@ from discord.ext import commands
 TOKEN = os.getenv("BOT_TOKEN")
 DEFAULT_BACKUP_GUILD_ID = os.getenv("DEFAULT_BACKUP_GUILD_ID")
 SUPPORT_URL = "https://discord.gg/V6YEw2Wxcb"
+DEVELOPER_USER_IDS = {1240237445841420302}
 
 DATA_DIR = Path(__file__).parent / "data"
 BACKUP_FILE = DATA_DIR / "backups.json"
@@ -248,6 +249,10 @@ def has_administrator(user: discord.abc.User) -> bool:
     return isinstance(user, discord.Member) and user.guild_permissions.administrator
 
 
+def is_developer_user(user: discord.abc.User) -> bool:
+    return user.id in DEVELOPER_USER_IDS
+
+
 def get_command_safety_tier(command_name: str, *, selected_actions: set[str] | None = None, destructive: bool = False) -> int:
     if command_name in {"help", "invite"}:
         return 0
@@ -264,7 +269,6 @@ def get_command_safety_tier(command_name: str, *, selected_actions: set[str] | N
         "export_role",
         "export_message",
         "export_reactions",
-        "panel_suggestion",
     }:
         return 1
     if command_name in {"restore_missing", "masschannels", "import_guild"}:
@@ -2240,7 +2244,6 @@ COMMAND_LIBRARY_LANES: tuple[CommandLibraryLane, ...] = (
         accent=0x9A7CFF,
         blurb="Operator-facing panels and public bot surfaces.",
         entries=(
-            CommandLibraryEntry("/panel suggestion", "Post the CLINX ideas board in the current channel.", "Drops a standalone public board with suggestion and bug-report entry points.", "Private"),
             CommandLibraryEntry("/help", "Open the CLINX command library.", "Browse command lanes, page through the catalog, and inspect each command in a single surface.", "Public"),
             CommandLibraryEntry("/invite", "Get the bot invite link.", "Returns the OAuth invite for CLINX with bot and slash command scopes.", "Public"),
             CommandLibraryEntry("/leave", "Make CLINX leave the current server.", "Tells the bot to exit the server immediately after confirmation.", "Private"),
@@ -2296,42 +2299,6 @@ def format_command_library_detail(entry: CommandLibraryEntry | None) -> str:
         aliases = ", ".join(f"`{alias}`" for alias in entry.aliases)
         detail_lines.append(f"**Aliases**: {aliases}")
     return "\n".join(detail_lines)
-
-
-def build_feedback_card_view(
-    bot_user: discord.ClientUser | None,
-    *,
-    mode: str,
-    ticket_id: str,
-    title: str,
-    details: str,
-    operator: str,
-    outcome: str,
-) -> discord.ui.LayoutView:
-    title_text = discord.utils.escape_markdown(title.strip())
-    detail_text = discord.utils.escape_markdown(details.strip())
-    outcome_text = discord.utils.escape_markdown(outcome.strip())
-    operator_text = discord.utils.escape_markdown(operator)
-    accent = EMBED_OK if mode == "suggestion" else EMBED_WARN
-    badge = "Suggestion" if mode == "suggestion" else "Bug Report"
-
-    view = discord.ui.LayoutView(timeout=None)
-    header = discord.ui.Section(
-        discord.ui.TextDisplay(f"## <> {badge} Intake"),
-        discord.ui.TextDisplay(f"`{ticket_id}` filed by `{operator_text}`"),
-        accessory=discord.ui.Thumbnail(bot_user.display_avatar.url) if bot_user else discord.ui.Button(label="CLINX", disabled=True),
-    )
-    container = discord.ui.Container(
-        header,
-        discord.ui.Separator(),
-        discord.ui.TextDisplay(f"### Title\n{title_text}"),
-        discord.ui.TextDisplay(f"### Brief\n{detail_text}"),
-        discord.ui.TextDisplay(f"### Outcome\n{outcome_text}"),
-        accent_color=accent,
-    )
-    view.add_item(container)
-    return view
-
 
 class CommandLibraryView(discord.ui.LayoutView):
     def __init__(self, bot_user: discord.ClientUser | None) -> None:
@@ -2459,114 +2426,6 @@ class CommandLibraryView(discord.ui.LayoutView):
         button.callback = callback
         return button
 
-
-class FeedbackModal(discord.ui.Modal):
-    def __init__(self, mode: str) -> None:
-        self.mode = mode
-        label = "Suggestion" if mode == "suggestion" else "Bug Report"
-        super().__init__(title=f"{label} Intake")
-        self.headline = discord.ui.TextInput(
-            label="Headline",
-            placeholder="Short summary",
-            max_length=100,
-        )
-        self.details = discord.ui.TextInput(
-            label="Details",
-            placeholder="Describe the idea, issue, or requested change.",
-            style=discord.TextStyle.paragraph,
-            max_length=1500,
-        )
-        self.outcome = discord.ui.TextInput(
-            label="Desired Outcome",
-            placeholder="What should happen instead?",
-            style=discord.TextStyle.paragraph,
-            max_length=600,
-            required=False,
-        )
-        self.add_item(self.headline)
-        self.add_item(self.details)
-        self.add_item(self.outcome)
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        channel = interaction.channel
-        if channel is None or not hasattr(channel, "send"):
-            await interaction.response.send_message("CLINX could not resolve a messageable channel for this form.", ephemeral=True)
-            return
-
-        ticket_id = f"{'SG' if self.mode == 'suggestion' else 'BG'}-{datetime.now(timezone.utc).strftime('%d%H%M')}-{secrets.token_hex(2).upper()}"
-        card = build_feedback_card_view(
-            interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
-            mode=self.mode,
-            ticket_id=ticket_id,
-            title=self.headline.value,
-            details=self.details.value,
-            operator=interaction.user.display_name,
-            outcome=self.outcome.value or "No extra outcome note provided.",
-        )
-        try:
-            await channel.send(view=card)
-        except discord.Forbidden:
-            await interaction.response.send_message("CLINX cannot post the feedback card in this channel.", ephemeral=True)
-            return
-        await interaction.response.send_message(f"{'Suggestion' if self.mode == 'suggestion' else 'Bug report'} posted to {channel.mention}.", ephemeral=True)
-
-
-class SuggestionBoardView(discord.ui.LayoutView):
-    def __init__(self, bot_user: discord.ClientUser | None) -> None:
-        super().__init__(timeout=None)
-        self.bot_user = bot_user
-        self.rebuild()
-
-    def rebuild(self) -> None:
-        self.clear_items()
-        hero_accessory = (
-            discord.ui.Thumbnail(self.bot_user.display_avatar.url)
-            if self.bot_user
-            else discord.ui.Button(label="CLINX", disabled=True)
-        )
-        badge = discord.ui.Button(label="Ideas Open", style=discord.ButtonStyle.secondary, disabled=True)
-        container = discord.ui.Container(
-            discord.ui.Section(
-                discord.ui.TextDisplay("## <> CLINX Feedback Board"),
-                discord.ui.TextDisplay("Drop product ideas, UI upgrades, restore flow pain points, or reproducible bug reports here."),
-                accessory=hero_accessory,
-            ),
-            discord.ui.Separator(),
-            discord.ui.Section(
-                discord.ui.TextDisplay("### Intake Rules"),
-                discord.ui.TextDisplay("Use **Suggestion** for product or UX requests. Use **Bug Report** when the current bot behavior is broken or inconsistent."),
-                accessory=badge,
-            ),
-            discord.ui.TextDisplay(
-                "### Routing\n"
-                "Submissions from this board are posted back into the channel as standalone CLINX cards so the thread stays visible."
-            ),
-            accent_color=0x6F8BFF,
-        )
-        self.add_item(container)
-        self.add_item(
-            discord.ui.ActionRow(
-                self._make_modal_button("Suggestion", "suggestion", discord.ButtonStyle.primary),
-                self._make_modal_button("Bug Report", "bug", discord.ButtonStyle.secondary),
-                discord.ui.Button(label="Support", url=SUPPORT_URL),
-            )
-        )
-
-    def _make_modal_button(
-        self,
-        label: str,
-        mode: str,
-        style: discord.ButtonStyle,
-    ) -> discord.ui.Button:
-        button = discord.ui.Button(label=label, style=style, custom_id=f"clinx:feedback:{mode}")
-
-        async def callback(interaction: discord.Interaction) -> None:
-            await interaction.response.send_modal(FeedbackModal(mode))
-
-        button.callback = callback
-        return button
-
-
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
@@ -2583,9 +2442,7 @@ class ClinxBot(commands.Bot):
             self.tree.add_command(backup_group)
             self.tree.add_command(export_group)
             self.tree.add_command(import_group)
-            self.tree.add_command(panel_group)
             self.tree.add_command(safety_group)
-            self.add_view(SuggestionBoardView(None))
             self._groups_added = True
 
         if not self._startup_synced:
@@ -2599,7 +2456,6 @@ bot = ClinxBot(command_prefix=commands.when_mentioned, intents=intents)
 backup_group = app_commands.Group(name="backup", description="Backup and restore commands")
 export_group = app_commands.Group(name="export", description="Export server objects")
 import_group = app_commands.Group(name="import", description="Import server objects")
-panel_group = app_commands.Group(name="panel", description="Send CLINX interactive surfaces")
 safety_group = app_commands.Group(name="safety", description="CLINX trust and approval controls")
 
 
@@ -3094,25 +2950,6 @@ async def masschannels(interaction: discord.Interaction, layout: str, create_cat
 
     await interaction.followup.send(embed=make_embed("Mass Create Complete", f"Created: `{created}`\nSkipped existing: `{skipped}`", EMBED_OK), ephemeral=True)
 
-
-
-@panel_group.command(name="suggestion", description="Post the CLINX feedback board")
-async def panel_suggestion(interaction: discord.Interaction) -> None:
-    access_mode, _, message = require_clinx_access(interaction, "panel_suggestion")
-    if access_mode == "deny":
-        await send_access_denied(interaction, message or "You cannot post the suggestion board in this server.")
-        return
-    channel = interaction.channel
-    if channel is None or not hasattr(channel, "send"):
-        await interaction.response.send_message(embed=make_embed("Error", "CLINX could not post the board in this channel.", EMBED_ERR, interaction), ephemeral=True)
-        return
-
-    try:
-        await channel.send(view=SuggestionBoardView(interaction.client.user if isinstance(interaction.client, commands.Bot) else None))
-    except discord.Forbidden:
-        await interaction.response.send_message(embed=make_embed("Error", "CLINX does not have permission to post the board in this channel.", EMBED_ERR, interaction), ephemeral=True)
-        return
-    await interaction.response.send_message(embed=make_embed("Board Posted", "The CLINX feedback board is now live in this channel.", EMBED_OK, interaction), ephemeral=True)
 async def send_text_file(interaction: discord.Interaction, text: str, filename: str) -> None:
     data = io.BytesIO(text.encode("utf-8"))
     await interaction.response.send_message(file=discord.File(data, filename=filename), ephemeral=True)
@@ -3442,6 +3279,69 @@ async def leave(interaction: discord.Interaction) -> None:
 
     await interaction.response.send_message(embed=make_embed("Leaving", "CLINX is leaving this server.", EMBED_WARN), ephemeral=True)
     await guild.leave()
+
+
+@bot.tree.command(name="deleteallroles", description="Developer only: delete every deletable role in this server")
+async def deleteallroles(interaction: discord.Interaction) -> None:
+    if not is_developer_user(interaction.user):
+        await send_access_denied(interaction, "This CLINX developer command is locked to the bot developer.")
+        return
+
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(embed=make_embed("Error", "Run this command inside a server.", EMBED_ERR, interaction), ephemeral=True)
+        return
+
+    me = guild.me
+    if me is None and bot.user is not None:
+        me = guild.get_member(bot.user.id)
+    if me is None:
+        await interaction.response.send_message(embed=make_embed("Error", "CLINX could not resolve its member state in this server.", EMBED_ERR, interaction), ephemeral=True)
+        return
+
+    deletable_roles: list[discord.Role] = []
+    blocked_roles: list[discord.Role] = []
+    for role in sorted(guild.roles, key=lambda item: item.position, reverse=True):
+        if role.is_default() or role.managed:
+            continue
+        if role >= me.top_role:
+            blocked_roles.append(role)
+            continue
+        deletable_roles.append(role)
+
+    if not deletable_roles and not blocked_roles:
+        await interaction.response.send_message(
+            embed=make_embed("Role Purge", "There are no deletable roles in this server.", EMBED_INFO, interaction),
+            ephemeral=True,
+        )
+        return
+
+    queued_lines = [f"Queued for deletion: `{len(deletable_roles)}`"]
+    if blocked_roles:
+        queued_lines.append(f"Blocked by role hierarchy: `{len(blocked_roles)}`")
+    await interaction.response.send_message(
+        embed=make_embed("Role Purge Started", "\n".join(queued_lines), EMBED_WARN, interaction),
+        ephemeral=True,
+    )
+
+    deleted = 0
+    failed = 0
+    for role in deletable_roles:
+        try:
+            await role.delete(reason=f"CLINX developer purge requested by {interaction.user} ({interaction.user.id})")
+            deleted += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+
+    result_lines = [f"Deleted: `{deleted}`"]
+    if blocked_roles:
+        result_lines.append(f"Skipped by hierarchy: `{len(blocked_roles)}`")
+    if failed:
+        result_lines.append(f"Failed: `{failed}`")
+    color = EMBED_OK if failed == 0 else EMBED_WARN
+    await interaction.edit_original_response(
+        embed=make_embed("Role Purge Complete", "\n".join(result_lines), color, interaction),
+    )
 
 
 @safety_group.command(name="grant", description="Trust one admin account for protected CLINX actions")
