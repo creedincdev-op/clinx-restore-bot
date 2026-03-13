@@ -2275,9 +2275,17 @@ class BackupVaultSelect(discord.ui.Select["BackupListCardView"]):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        self.view.selected_backup_id = self.values[0]
-        self.view.rebuild()
-        await interaction.response.edit_message(view=self.view)
+        selected_backup_id = self.values[0]
+        new_view = BackupListCardView(
+            self.view.bot_user,
+            author_id=self.view.author_id,
+            entries=self.view.entries,
+            backup_limit=self.view.backup_limit,
+            plan_label=self.view.plan_label,
+            page=self.view.page,
+            selected_backup_id=selected_backup_id,
+        )
+        await interaction.response.edit_message(view=new_view)
 
 
 class BackupVaultPageButton(discord.ui.Button["BackupListCardView"]):
@@ -2286,12 +2294,21 @@ class BackupVaultPageButton(discord.ui.Button["BackupListCardView"]):
         self.delta = delta
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        self.view.page = max(0, min(self.view.page + self.delta, self.view.max_page_index))
-        page_entries = self.view.current_page_entries
-        if page_entries and self.view.selected_backup_id not in {entry.get("id") for entry in page_entries}:
-            self.view.selected_backup_id = None
-        self.view.rebuild()
-        await interaction.response.edit_message(view=self.view)
+        next_page = max(0, min(self.view.page + self.delta, self.view.max_page_index))
+        page_entries = self.view.entries[next_page * BACKUP_VAULT_PAGE_SIZE:(next_page + 1) * BACKUP_VAULT_PAGE_SIZE]
+        selected_backup_id = self.view.selected_backup_id
+        if page_entries and selected_backup_id not in {entry.get("id") for entry in page_entries}:
+            selected_backup_id = None
+        new_view = BackupListCardView(
+            self.view.bot_user,
+            author_id=self.view.author_id,
+            entries=self.view.entries,
+            backup_limit=self.view.backup_limit,
+            plan_label=self.view.plan_label,
+            page=next_page,
+            selected_backup_id=selected_backup_id,
+        )
+        await interaction.response.edit_message(view=new_view)
 
 
 class BackupVaultLoadButton(discord.ui.Button["BackupListCardView"]):
@@ -2309,10 +2326,17 @@ class BackupVaultLoadButton(discord.ui.Button["BackupListCardView"]):
 
         record = await get_user_backup_record_async(self.view.author_id, selected_entry["id"])
         if record is None:
-            self.view.entries = await list_user_backup_entries_async(self.view.author_id)
-            self.view.selected_backup_id = None
-            self.view.rebuild()
-            await interaction.response.edit_message(view=self.view)
+            entries = await list_user_backup_entries_async(self.view.author_id)
+            new_view = BackupListCardView(
+                self.view.bot_user,
+                author_id=self.view.author_id,
+                entries=entries,
+                backup_limit=self.view.backup_limit,
+                plan_label=self.view.plan_label,
+                page=min(self.view.page, max(0, (len(entries) - 1) // BACKUP_VAULT_PAGE_SIZE) if entries else 0),
+                selected_backup_id=None,
+            )
+            await interaction.response.edit_message(view=new_view)
             return
 
         planner = BackupLoadPlannerView(
@@ -2348,15 +2372,21 @@ class BackupVaultDeleteButton(discord.ui.Button["BackupListCardView"]):
             return
 
         deleted = await delete_user_backup_async(self.view.author_id, selected_entry["id"])
-        self.view.entries = await list_user_backup_entries_async(self.view.author_id)
-        self.view.page = min(self.view.page, self.view.max_page_index)
-        self.view.selected_backup_id = None
-        self.view.rebuild()
+        entries = await list_user_backup_entries_async(self.view.author_id)
+        new_view = BackupListCardView(
+            self.view.bot_user,
+            author_id=self.view.author_id,
+            entries=entries,
+            backup_limit=self.view.backup_limit,
+            plan_label=self.view.plan_label,
+            page=min(self.view.page, max(0, (len(entries) - 1) // BACKUP_VAULT_PAGE_SIZE) if entries else 0),
+            selected_backup_id=None,
+        )
         if not deleted:
-            await interaction.response.edit_message(view=self.view)
+            await interaction.response.edit_message(view=new_view)
             await interaction.followup.send("That backup no longer exists in your vault.", ephemeral=True)
             return
-        await interaction.response.edit_message(view=self.view)
+        await interaction.response.edit_message(view=new_view)
 
 
 class BackupListCardView(discord.ui.LayoutView):
@@ -2368,6 +2398,8 @@ class BackupListCardView(discord.ui.LayoutView):
         entries: list[dict[str, Any]],
         backup_limit: int,
         plan_label: str,
+        page: int = 0,
+        selected_backup_id: str | None = None,
     ) -> None:
         super().__init__(timeout=900)
         self.bot_user = bot_user
@@ -2375,8 +2407,8 @@ class BackupListCardView(discord.ui.LayoutView):
         self.entries = entries
         self.backup_limit = backup_limit
         self.plan_label = plan_label
-        self.page = 0
-        self.selected_backup_id: str | None = None
+        self.page = page
+        self.selected_backup_id = selected_backup_id
         self.rebuild()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -2467,7 +2499,7 @@ class BackupListCardView(discord.ui.LayoutView):
                     discord.ui.TextDisplay("### Vault Feed"),
                     discord.ui.TextDisplay(
                         f"`{len(self.entries)}/{self.backup_limit}` private backups stored\n"
-                        "Select one backup ID ready for restore."
+                        f"`{len(page_entries)}` backup ID ready for restore on this page."
                     ),
                     accessory=count_badge,
                 ),
@@ -2477,10 +2509,10 @@ class BackupListCardView(discord.ui.LayoutView):
                         f"Current page: `{self.page + 1}` / `{self.max_page_index + 1}`\n"
                         "Pick one from the selector below to unlock the saved structure preview."
                     ),
-                    accessory=vault_badge,
+                    accessory=discord.ui.Button(label="Private", style=discord.ButtonStyle.secondary, disabled=True),
                 ),
                 discord.ui.TextDisplay(
-                    "### Vault Page\n"
+                    "### Backup IDs\n"
                     f"{chr(10).join(page_feed_blocks[:8]) if page_feed_blocks else '- No backups on this page.'}"
                 ),
                 accent_color=EMBED_INFO,
