@@ -5859,6 +5859,37 @@ async def dev_ban(ctx: commands.Context, member: discord.Member, *, reason: str 
         await send_temp_prefix_notice(ctx, "Ban Failed", f"CLINX could not ban {member.mention}.", EMBED_ERR)
 
 
+@bot.command(name="purge", hidden=True)
+async def dev_purge(ctx: commands.Context, amount: int | None = None) -> None:
+    if not is_developer_user(ctx.author):
+        return
+    if ctx.guild is None:
+        await send_temp_prefix_notice(ctx, "Purge Failed", "Run this in a server channel.", EMBED_ERR)
+        return
+    if not isinstance(ctx.channel, (discord.TextChannel, discord.Thread)):
+        await send_temp_prefix_notice(ctx, "Purge Failed", "Use this inside a text channel or thread.", EMBED_ERR)
+        return
+
+    purge_count = max(1, min(int(amount or 1), 200))
+    try:
+        deleted_messages = await ctx.channel.purge(
+            limit=purge_count + 1,
+            bulk=True,
+            reason=f"CLINX developer purge by {ctx.author} ({ctx.author.id})",
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        await send_temp_prefix_notice(ctx, "Purge Failed", "CLINX could not purge messages in this channel.", EMBED_ERR)
+        return
+
+    deleted_count = max(0, len(deleted_messages) - 1)
+    await send_temp_prefix_notice(
+        ctx,
+        "Purge Complete",
+        f"Deleted `{deleted_count}` recent message(s) in {ctx.channel.mention}.",
+        EMBED_OK,
+    )
+
+
 @bot.command(name="gift", hidden=True)
 async def dev_gift(ctx: commands.Context, member: discord.Member, *, plan_text: str | None = None) -> None:
     if not is_developer_user(ctx.author):
@@ -5902,15 +5933,10 @@ async def dev_dashboard(ctx: commands.Context) -> None:
         return
 
     try:
-        await ctx.author.send(view=dashboard_view)
+        dm_channel = ctx.author.dm_channel or await ctx.author.create_dm()
+        await dm_channel.send(view=dashboard_view)
     except (discord.Forbidden, discord.HTTPException):
-        await send_temp_prefix_notice(
-            ctx,
-            "Dashboard Delivery Failed",
-            "CLINX could not DM the developer console. Open your DMs and try again.",
-            EMBED_ERR,
-            delay_seconds=5.0,
-        )
+        await ctx.send(view=dashboard_view)
         return
 
     try:
