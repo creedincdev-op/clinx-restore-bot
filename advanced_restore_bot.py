@@ -214,6 +214,7 @@ def get_guild_safety_bucket(store: dict[str, Any], guild_id: int) -> dict[str, A
         {
             "trusted_admin_ids": [],
             "full_access_user_ids": [],
+            "full_access_records": {},
             "premium_entitlement": None,
             "backup_interval": None,
         },
@@ -222,12 +223,47 @@ def get_guild_safety_bucket(store: dict[str, Any], guild_id: int) -> dict[str, A
         bucket["trusted_admin_ids"] = []
     if not isinstance(bucket.get("full_access_user_ids"), list):
         bucket["full_access_user_ids"] = []
+    if not isinstance(bucket.get("full_access_records"), dict):
+        bucket["full_access_records"] = {}
     if bucket.get("premium_entitlement") is not None and not isinstance(bucket.get("premium_entitlement"), dict):
         bucket["premium_entitlement"] = None
     if bucket.get("backup_interval") is not None and not isinstance(bucket.get("backup_interval"), dict):
         bucket["backup_interval"] = None
     bucket["trusted_admin_ids"] = sorted({str(user_id) for user_id in bucket["trusted_admin_ids"]})
     bucket["full_access_user_ids"] = sorted({str(user_id) for user_id in bucket["full_access_user_ids"]})
+    normalized_full_access_records: dict[str, dict[str, Any]] = {}
+    for user_id in bucket["full_access_user_ids"]:
+        raw_record = bucket["full_access_records"].get(user_id, {})
+        if not isinstance(raw_record, dict):
+            raw_record = {}
+        normalized_full_access_records[user_id] = {
+            "user_id": user_id,
+            "user_display_name": str(raw_record.get("user_display_name") or f"User {user_id}"),
+            "granted_at": raw_record.get("granted_at"),
+            "granted_by_user_id": str(raw_record.get("granted_by_user_id") or ""),
+            "granted_by_display_name": str(raw_record.get("granted_by_display_name") or "Unknown Operator"),
+            "guild_name": str(raw_record.get("guild_name") or f"Guild {guild_id}"),
+        }
+    bucket["full_access_records"] = normalized_full_access_records
+    if bucket.get("premium_entitlement") is not None:
+        entitlement = dict(bucket["premium_entitlement"])
+        if entitlement.get("gifted_to_user_id") is not None:
+            entitlement["gifted_to_user_id"] = str(entitlement["gifted_to_user_id"])
+        if entitlement.get("gifted_by_user_id") is not None:
+            entitlement["gifted_by_user_id"] = str(entitlement["gifted_by_user_id"])
+        if entitlement.get("cancelled_by_user_id") is not None:
+            entitlement["cancelled_by_user_id"] = str(entitlement["cancelled_by_user_id"])
+        entitlement["active"] = bool(entitlement.get("active", True))
+        entitlement["gifted_to_display_name"] = str(
+            entitlement.get("gifted_to_display_name") or f"User {entitlement.get('gifted_to_user_id', 'unknown')}"
+        )
+        entitlement["gifted_by_display_name"] = str(
+            entitlement.get("gifted_by_display_name") or "Unknown Operator"
+        )
+        entitlement["guild_name"] = str(entitlement.get("guild_name") or f"Guild {guild_id}")
+        if entitlement.get("cancelled_by_display_name") is not None:
+            entitlement["cancelled_by_display_name"] = str(entitlement["cancelled_by_display_name"])
+        bucket["premium_entitlement"] = entitlement
     return bucket
 
 
@@ -743,7 +779,15 @@ def get_guild_premium_entitlement(guild_id: int) -> dict[str, Any] | None:
     return entitlement if isinstance(entitlement, dict) else None
 
 
-def set_guild_premium_entitlement(guild: discord.Guild, gifted_to_user_id: int, gifted_by_user_id: int, plan_key: str) -> dict[str, Any]:
+def set_guild_premium_entitlement(
+    guild: discord.Guild,
+    gifted_to_user_id: int,
+    gifted_by_user_id: int,
+    plan_key: str,
+    *,
+    gifted_to_display_name: str | None = None,
+    gifted_by_display_name: str | None = None,
+) -> dict[str, Any]:
     store = load_safety_store()
     bucket = get_guild_safety_bucket(store, guild.id)
     plan = PREMIUM_PLAN_CATALOG[plan_key]
@@ -751,10 +795,37 @@ def set_guild_premium_entitlement(guild: discord.Guild, gifted_to_user_id: int, 
         "plan_key": plan_key,
         "plan_name": plan["display_name"],
         "gifted_to_user_id": str(gifted_to_user_id),
+        "gifted_to_display_name": gifted_to_display_name or f"User {gifted_to_user_id}",
         "gifted_by_user_id": str(gifted_by_user_id),
+        "gifted_by_display_name": gifted_by_display_name or "Unknown Operator",
         "gifted_at": utc_now_iso(),
+        "guild_name": guild.name,
         "active": True,
+        "cancelled_at": None,
+        "cancelled_by_user_id": None,
+        "cancelled_by_display_name": None,
     }
+    bucket["premium_entitlement"] = entitlement
+    save_safety_store(store)
+    return entitlement
+
+
+def cancel_guild_premium_entitlement(
+    guild_id: int,
+    *,
+    cancelled_by_user_id: int,
+    cancelled_by_display_name: str,
+) -> dict[str, Any] | None:
+    store = load_safety_store()
+    bucket = get_guild_safety_bucket(store, guild_id)
+    entitlement = bucket.get("premium_entitlement")
+    if not isinstance(entitlement, dict):
+        return None
+    entitlement = dict(entitlement)
+    entitlement["active"] = False
+    entitlement["cancelled_at"] = utc_now_iso()
+    entitlement["cancelled_by_user_id"] = str(cancelled_by_user_id)
+    entitlement["cancelled_by_display_name"] = cancelled_by_display_name
     bucket["premium_entitlement"] = entitlement
     save_safety_store(store)
     return entitlement
@@ -862,6 +933,86 @@ def normalize_premium_plan(raw_plan: str | None) -> str | None:
         "premiummax": "pro_ultra",
     }
     return aliases.get(token)
+
+
+def format_actor_label(display_name: str | None, user_id: str | int | None) -> str:
+    clean_name = (display_name or "Unknown User").strip()
+    if user_id in (None, ""):
+        return clean_name
+    return f"{clean_name} (`{user_id}`)"
+
+
+def build_developer_dashboard_entries(
+    bot_instance: commands.Bot,
+    *,
+    developer_id: int,
+    mode: str,
+) -> list[dict[str, Any]]:
+    store = load_safety_store()
+    entries: list[dict[str, Any]] = []
+    for guild_key in list(store.get("guilds", {}).keys()):
+        try:
+            guild_id = int(guild_key)
+        except ValueError:
+            continue
+        bucket = get_guild_safety_bucket(store, guild_id)
+        guild = bot_instance.get_guild(guild_id)
+        fallback_guild_name = f"Guild {guild_id}"
+        premium_bucket = bucket.get("premium_entitlement")
+        guild_name = guild.name if guild else (
+            str(premium_bucket.get("guild_name")) if isinstance(premium_bucket, dict) and premium_bucket.get("guild_name") else fallback_guild_name
+        )
+
+        if mode == "obypass":
+            records = bucket.get("full_access_records", {})
+            for user_id in bucket.get("full_access_user_ids", []):
+                record = records.get(user_id, {})
+                entries.append(
+                    {
+                        "key": f"obypass:{guild_id}:{user_id}",
+                        "kind": "obypass",
+                        "guild_id": guild_id,
+                        "guild_name": str(record.get("guild_name") or guild_name),
+                        "user_id": str(user_id),
+                        "user_display_name": str(record.get("user_display_name") or f"User {user_id}"),
+                        "granted_at": record.get("granted_at"),
+                        "granted_by_user_id": str(record.get("granted_by_user_id") or ""),
+                        "granted_by_display_name": str(record.get("granted_by_display_name") or "Unknown Operator"),
+                    }
+                )
+            continue
+
+        entitlement = bucket.get("premium_entitlement")
+        if not isinstance(entitlement, dict):
+            continue
+        if str(entitlement.get("gifted_by_user_id") or "") != str(developer_id):
+            continue
+        entries.append(
+            {
+                "key": f"premium:{guild_id}",
+                "kind": "premium",
+                "guild_id": guild_id,
+                "guild_name": str(entitlement.get("guild_name") or guild_name),
+                "plan_key": str(entitlement.get("plan_key") or "free"),
+                "plan_name": str(entitlement.get("plan_name") or "Unknown Plan"),
+                "gifted_to_user_id": str(entitlement.get("gifted_to_user_id") or ""),
+                "gifted_to_display_name": str(entitlement.get("gifted_to_display_name") or "Unknown User"),
+                "gifted_by_user_id": str(entitlement.get("gifted_by_user_id") or ""),
+                "gifted_by_display_name": str(entitlement.get("gifted_by_display_name") or "Unknown Operator"),
+                "gifted_at": entitlement.get("gifted_at"),
+                "active": bool(entitlement.get("active", True)),
+                "cancelled_at": entitlement.get("cancelled_at"),
+                "cancelled_by_user_id": str(entitlement.get("cancelled_by_user_id") or ""),
+                "cancelled_by_display_name": str(entitlement.get("cancelled_by_display_name") or ""),
+            }
+        )
+
+    def sort_key(entry: dict[str, Any]) -> tuple[float, str]:
+        timestamp_key = "granted_at" if entry["kind"] == "obypass" else "gifted_at"
+        dt = parse_iso_timestamp(entry.get(timestamp_key))
+        return (dt.timestamp() if dt else 0.0, entry.get("guild_name", ""))
+
+    return sorted(entries, key=sort_key, reverse=True)
 
 
 def has_administrator(user: discord.abc.User) -> bool:
@@ -2235,6 +2386,7 @@ class BackupIntervalCardView(discord.ui.LayoutView):
 BACKUP_VAULT_PAGE_SIZE = 10
 BACKUP_STRUCTURE_PREVIEW_LIMIT = 900
 BACKUP_ROLE_PREVIEW_LIMIT = 900
+DEVELOPER_DASHBOARD_PAGE_SIZE = 8
 
 
 def format_backup_structure_preview(summary: dict[str, Any] | None) -> str:
@@ -2795,6 +2947,296 @@ class PremiumGiftCardView(discord.ui.LayoutView):
                     f"- Gifted by: <@{self.gifted_by_id}> · Activated: `{gifted_at}`"
                 ),
                 accent_color=EMBED_INFO,
+            )
+        )
+
+
+class DeveloperDashboardSelect(discord.ui.Select["DeveloperDashboardView"]):
+    def __init__(self, page_entries: list[dict[str, Any]], selected_key: str | None) -> None:
+        options: list[discord.SelectOption] = []
+        for entry in page_entries:
+            if entry["kind"] == "obypass":
+                label = entry["user_display_name"][:100]
+                description = f"{entry['guild_name']} • {format_backup_timestamp(entry.get('granted_at'))}"[:100]
+            else:
+                status = "Active" if entry.get("active") else "Cancelled"
+                label = f"{entry['plan_name']} • {entry['gifted_to_display_name']}"[:100]
+                description = f"{entry['guild_name']} • {status}"[:100]
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    description=description,
+                    value=entry["key"],
+                    default=entry["key"] == selected_key,
+                )
+            )
+        super().__init__(placeholder="Select a record", options=options, disabled=not options)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        new_view = self.view.spawn(selected_key=self.values[0], action_note=None)
+        await interaction.response.edit_message(view=new_view)
+
+
+class DeveloperDashboardPageButton(discord.ui.Button["DeveloperDashboardView"]):
+    def __init__(self, *, label: str, delta: int, disabled: bool) -> None:
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, disabled=disabled)
+        self.delta = delta
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        next_page = max(0, min(self.view.page + self.delta, self.view.max_page_index))
+        page_entries = self.view.entries[next_page * DEVELOPER_DASHBOARD_PAGE_SIZE:(next_page + 1) * DEVELOPER_DASHBOARD_PAGE_SIZE]
+        selected_key = self.view.selected_key
+        if page_entries and selected_key not in {entry["key"] for entry in page_entries}:
+            selected_key = None
+        new_view = self.view.spawn(page=next_page, selected_key=selected_key, action_note=None)
+        await interaction.response.edit_message(view=new_view)
+
+
+class DeveloperDashboardActionButton(discord.ui.Button["DeveloperDashboardView"]):
+    def __init__(self, mode: str, selected_entry: dict[str, Any] | None) -> None:
+        if mode == "obypass":
+            super().__init__(label="Revoke OBypass", style=discord.ButtonStyle.danger, disabled=selected_entry is None)
+            return
+        disabled = selected_entry is None or not selected_entry.get("active", False)
+        super().__init__(label="Cancel Premium", style=discord.ButtonStyle.danger, disabled=disabled)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        selected_entry = self.view.selected_entry
+        if selected_entry is None:
+            await interaction.response.send_message("Select a record first.", ephemeral=True)
+            return
+
+        if selected_entry["kind"] == "obypass":
+            revoke_full_access_by_user_id(selected_entry["guild_id"], int(selected_entry["user_id"]))
+            action_note = (
+                f"Removed {format_actor_label(selected_entry['user_display_name'], selected_entry['user_id'])} "
+                f"from `{selected_entry['guild_name']}`."
+            )
+            new_view = self.view.spawn(selected_key=None, action_note=action_note)
+        else:
+            cancelled = cancel_guild_premium_entitlement(
+                selected_entry["guild_id"],
+                cancelled_by_user_id=interaction.user.id,
+                cancelled_by_display_name=getattr(interaction.user, "display_name", str(interaction.user)),
+            )
+            if cancelled is None:
+                action_note = "Premium entitlement was not found anymore."
+            else:
+                action_note = (
+                    f"Cancelled `{selected_entry['plan_name']}` for "
+                    f"{format_actor_label(selected_entry['gifted_to_display_name'], selected_entry['gifted_to_user_id'])} "
+                    f"in `{selected_entry['guild_name']}`."
+                )
+            new_view = self.view.spawn(selected_key=selected_entry["key"], action_note=action_note)
+
+        await interaction.response.edit_message(view=new_view)
+
+
+class DeveloperDashboardView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        bot_instance: commands.Bot,
+        *,
+        author_id: int,
+        mode: str = "obypass",
+        page: int = 0,
+        selected_key: str | None = None,
+        action_note: str | None = None,
+    ) -> None:
+        super().__init__(timeout=None)
+        self.bot_instance = bot_instance
+        self.bot_user = bot_instance.user
+        self.author_id = author_id
+        self.mode = mode if mode in {"obypass", "premium"} else "obypass"
+        self.action_note = action_note
+        self.entries = build_developer_dashboard_entries(bot_instance, developer_id=author_id, mode=self.mode)
+        self.max_page_index = max(0, (len(self.entries) - 1) // DEVELOPER_DASHBOARD_PAGE_SIZE) if self.entries else 0
+        self.page = max(0, min(page, self.max_page_index))
+        self.selected_key = selected_key if selected_key in {entry["key"] for entry in self.entries} else None
+        self.rebuild()
+
+    @property
+    def page_entries(self) -> list[dict[str, Any]]:
+        start = self.page * DEVELOPER_DASHBOARD_PAGE_SIZE
+        return self.entries[start:start + DEVELOPER_DASHBOARD_PAGE_SIZE]
+
+    @property
+    def selected_entry(self) -> dict[str, Any] | None:
+        if not self.selected_key:
+            return None
+        return next((entry for entry in self.entries if entry["key"] == self.selected_key), None)
+
+    def spawn(
+        self,
+        *,
+        mode: str | None = None,
+        page: int | None = None,
+        selected_key: str | None | object = Ellipsis,
+        action_note: str | None | object = Ellipsis,
+    ) -> "DeveloperDashboardView":
+        return DeveloperDashboardView(
+            self.bot_instance,
+            author_id=self.author_id,
+            mode=mode or self.mode,
+            page=self.page if page is None else page,
+            selected_key=self.selected_key if selected_key is Ellipsis else selected_key,
+            action_note=self.action_note if action_note is Ellipsis else action_note,
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "This developer console is locked to the CLINX developer.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    def _make_mode_button(self, mode_key: str, label: str) -> discord.ui.Button:
+        button = discord.ui.Button(
+            label=label,
+            style=discord.ButtonStyle.primary if self.mode == mode_key else discord.ButtonStyle.secondary,
+            disabled=self.mode == mode_key,
+        )
+
+        async def callback(interaction: discord.Interaction) -> None:
+            await interaction.response.edit_message(view=self.spawn(mode=mode_key, page=0, selected_key=None, action_note=None))
+
+        button.callback = callback
+        return button
+
+    def _make_refresh_button(self) -> discord.ui.Button:
+        button = discord.ui.Button(label="Refresh", style=discord.ButtonStyle.success)
+
+        async def callback(interaction: discord.Interaction) -> None:
+            await interaction.response.edit_message(
+                view=self.spawn(action_note=f"Console refreshed at `{format_backup_timestamp(utc_now_iso())}`.")
+            )
+
+        button.callback = callback
+        return button
+
+    def _build_page_feed(self) -> str:
+        if not self.page_entries:
+            return "- No records are available in this lane."
+        lines: list[str] = []
+        start_index = self.page * DEVELOPER_DASHBOARD_PAGE_SIZE
+        for offset, entry in enumerate(self.page_entries, start=1):
+            index = start_index + offset
+            if entry["kind"] == "obypass":
+                lines.append(
+                    f"**{index}.** {format_actor_label(entry['user_display_name'], entry['user_id'])}\n"
+                    f"Guild: `{entry['guild_name']}`\n"
+                    f"Granted: `{format_backup_timestamp(entry.get('granted_at'))}`"
+                )
+                continue
+            status = "Active" if entry.get("active") else "Cancelled"
+            lines.append(
+                f"**{index}.** `{entry['plan_name']}` -> {format_actor_label(entry['gifted_to_display_name'], entry['gifted_to_user_id'])}\n"
+                f"Guild: `{entry['guild_name']}`\n"
+                f"State: `{status}` · Gifted: `{format_backup_timestamp(entry.get('gifted_at'))}`"
+            )
+        return "\n".join(lines)
+
+    def _build_selection_state(self) -> tuple[str, str, discord.ButtonStyle]:
+        entry = self.selected_entry
+        if entry is None:
+            return (
+                "Selection locked",
+                "Pick a record from the selector below to unlock revoke or cancel actions.",
+                discord.ButtonStyle.secondary,
+            )
+
+        if entry["kind"] == "obypass":
+            return (
+                "Override armed",
+                (
+                    f"User: {format_actor_label(entry['user_display_name'], entry['user_id'])}\n"
+                    f"Guild: `{entry['guild_name']}`\n"
+                    f"Granted: `{format_backup_timestamp(entry.get('granted_at'))}`\n"
+                    f"Granted By: {format_actor_label(entry.get('granted_by_display_name'), entry.get('granted_by_user_id'))}"
+                ),
+                discord.ButtonStyle.primary,
+            )
+
+        status_label = "Active" if entry.get("active") else "Cancelled"
+        cancelled_line = ""
+        if entry.get("cancelled_at"):
+            cancelled_line = (
+                f"\nCancelled: `{format_backup_timestamp(entry.get('cancelled_at'))}`"
+                f"\nCancelled By: {format_actor_label(entry.get('cancelled_by_display_name'), entry.get('cancelled_by_user_id'))}"
+            )
+        return (
+            status_label,
+            (
+                f"Recipient: {format_actor_label(entry['gifted_to_display_name'], entry['gifted_to_user_id'])}\n"
+                f"Guild: `{entry['guild_name']}`\n"
+                f"Plan: `{entry['plan_name']}`\n"
+                f"Gifted: `{format_backup_timestamp(entry.get('gifted_at'))}`"
+                f"{cancelled_line}"
+            ),
+            discord.ButtonStyle.success if entry.get("active") else discord.ButtonStyle.secondary,
+        )
+
+    def rebuild(self) -> None:
+        self.clear_items()
+        hero = (
+            discord.ui.Thumbnail(self.bot_user.display_avatar.url)
+            if self.bot_user
+            else discord.ui.Button(label="CLINX", disabled=True)
+        )
+        lane_title = "OBypass Registry" if self.mode == "obypass" else "Premium Ledger"
+        lane_summary = (
+            f"`{len(self.entries)}` active override record(s) tracked across all cached CLINX servers."
+            if self.mode == "obypass"
+            else f"`{len(self.entries)}` gifted premium record(s) issued by your developer account."
+        )
+        selection_badge, selection_text, selection_style = self._build_selection_state()
+        action_log = self.action_note or (
+            "- Revoke OBypass removes the runtime override from the selected server.\n"
+            "- Cancel Premium turns off the stored guild entitlement without deleting the record."
+        )
+
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.Section(
+                    discord.ui.TextDisplay("## <> Developer Console"),
+                    discord.ui.TextDisplay("Track developer override grants and premium gifts from one private control surface."),
+                    accessory=hero,
+                ),
+                discord.ui.Separator(),
+                discord.ui.Section(
+                    discord.ui.TextDisplay("### Current Lane"),
+                    discord.ui.TextDisplay(lane_summary),
+                    accessory=discord.ui.Button(label=lane_title, style=discord.ButtonStyle.primary, disabled=True),
+                ),
+                discord.ui.Section(
+                    discord.ui.TextDisplay("### Selection State"),
+                    discord.ui.TextDisplay(selection_text),
+                    accessory=discord.ui.Button(label=selection_badge, style=selection_style, disabled=True),
+                ),
+                discord.ui.TextDisplay(
+                    "### Page Feed\n"
+                    f"Page: `{self.page + 1}` / `{self.max_page_index + 1 if self.entries else 1}`\n"
+                    + self._build_page_feed()
+                ),
+                discord.ui.TextDisplay("### Action Log\n" + action_log),
+                accent_color=EMBED_INFO if self.mode == "obypass" else EMBED_OK,
+            )
+        )
+        self.add_item(
+            discord.ui.ActionRow(
+                self._make_mode_button("obypass", "OBypass"),
+                self._make_mode_button("premium", "Premium"),
+                self._make_refresh_button(),
+            )
+        )
+        self.add_item(discord.ui.ActionRow(DeveloperDashboardSelect(self.page_entries, self.selected_key)))
+        self.add_item(
+            discord.ui.ActionRow(
+                DeveloperDashboardPageButton(label="Previous", delta=-1, disabled=self.page <= 0),
+                DeveloperDashboardPageButton(label="Next", delta=1, disabled=self.page >= self.max_page_index),
+                DeveloperDashboardActionButton(self.mode, self.selected_entry),
             )
         )
 
@@ -5071,7 +5513,7 @@ async def handle_access_grant(interaction: discord.Interaction, user: discord.Me
         await interaction.response.send_message(embed=make_embed("Error", "Run in a server.", EMBED_ERR), ephemeral=True)
         return
 
-    full_access_ids = grant_full_access_for_user(interaction.guild, user)
+    full_access_ids = grant_full_access_for_user(interaction.guild, user, granted_by=interaction.user)
     await interaction.response.send_message(
         view=FullAccessRosterCardView(
             interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
@@ -5111,22 +5553,44 @@ async def handle_access_revoke(interaction: discord.Interaction, user: discord.M
     )
 
 
-def grant_full_access_for_user(guild: discord.Guild, user: discord.Member) -> list[str]:
+def grant_full_access_for_user(
+    guild: discord.Guild,
+    user: discord.abc.User,
+    *,
+    granted_by: discord.abc.User | None = None,
+) -> list[str]:
     store = load_safety_store()
     bucket = get_guild_safety_bucket(store, guild.id)
     full_access_ids = set(bucket.get("full_access_user_ids", []))
-    full_access_ids.add(str(user.id))
+    user_id = str(user.id)
+    full_access_ids.add(user_id)
     bucket["full_access_user_ids"] = sorted(full_access_ids)
+    records = bucket.setdefault("full_access_records", {})
+    records[user_id] = {
+        "user_id": user_id,
+        "user_display_name": getattr(user, "display_name", str(user)),
+        "granted_at": utc_now_iso(),
+        "granted_by_user_id": str(granted_by.id) if granted_by else "",
+        "granted_by_display_name": getattr(granted_by, "display_name", str(granted_by)) if granted_by else "Unknown Operator",
+        "guild_name": guild.name,
+    }
     save_safety_store(store)
     return bucket["full_access_user_ids"]
 
 
 def revoke_full_access_for_user(guild: discord.Guild, user: discord.Member) -> list[str]:
+    return revoke_full_access_by_user_id(guild.id, user.id)
+
+
+def revoke_full_access_by_user_id(guild_id: int, user_id: int) -> list[str]:
     store = load_safety_store()
-    bucket = get_guild_safety_bucket(store, guild.id)
-    full_access_ids = {str(user_id) for user_id in bucket.get("full_access_user_ids", [])}
-    full_access_ids.discard(str(user.id))
+    bucket = get_guild_safety_bucket(store, guild_id)
+    user_id_str = str(user_id)
+    full_access_ids = {str(raw_user_id) for raw_user_id in bucket.get("full_access_user_ids", [])}
+    full_access_ids.discard(user_id_str)
     bucket["full_access_user_ids"] = sorted(full_access_ids)
+    records = bucket.setdefault("full_access_records", {})
+    records.pop(user_id_str, None)
     save_safety_store(store)
     return bucket["full_access_user_ids"]
 
@@ -5157,7 +5621,7 @@ async def dev_grant(ctx: commands.Context, member: discord.Member, mode: str | N
     if (mode or "").casefold() != "obypass":
         await ctx.send("Usage: `^^^grant @user obypass`")
         return
-    full_access_ids = grant_full_access_for_user(ctx.guild, member)
+    full_access_ids = grant_full_access_for_user(ctx.guild, member, granted_by=ctx.author)
     await ctx.send(
         view=FullAccessRosterCardView(
             bot.user,
@@ -5408,7 +5872,14 @@ async def dev_gift(ctx: commands.Context, member: discord.Member, *, plan_text: 
         await ctx.send("Usage: `^^^gift @user pro`, `^^^gift @user pro plus`, or `^^^gift @user premium(max)`")
         return
 
-    entitlement = set_guild_premium_entitlement(ctx.guild, member.id, ctx.author.id, plan_key)
+    entitlement = set_guild_premium_entitlement(
+        ctx.guild,
+        member.id,
+        ctx.author.id,
+        plan_key,
+        gifted_to_display_name=member.display_name,
+        gifted_by_display_name=ctx.author.display_name,
+    )
     await ctx.send(
         view=PremiumGiftCardView(
             bot.user,
@@ -5417,6 +5888,41 @@ async def dev_gift(ctx: commands.Context, member: discord.Member, *, plan_text: 
             gifted_by_id=ctx.author.id,
             entitlement=entitlement,
         )
+    )
+
+
+@bot.command(name="dashboard", hidden=True, aliases=["devpanel"])
+async def dev_dashboard(ctx: commands.Context) -> None:
+    if not is_developer_user(ctx.author):
+        return
+
+    dashboard_view = DeveloperDashboardView(bot, author_id=ctx.author.id)
+    if ctx.guild is None:
+        await ctx.send(view=dashboard_view)
+        return
+
+    try:
+        await ctx.author.send(view=dashboard_view)
+    except (discord.Forbidden, discord.HTTPException):
+        await send_temp_prefix_notice(
+            ctx,
+            "Dashboard Delivery Failed",
+            "CLINX could not DM the developer console. Open your DMs and try again.",
+            EMBED_ERR,
+            delay_seconds=5.0,
+        )
+        return
+
+    try:
+        await ctx.message.delete()
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+    await send_temp_prefix_notice(
+        ctx,
+        "Developer Console",
+        "CLINX delivered the developer dashboard in your DMs.",
+        EMBED_INFO,
     )
 
 
