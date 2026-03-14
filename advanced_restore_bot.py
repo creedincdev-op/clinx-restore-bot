@@ -2481,8 +2481,8 @@ class BackupListCardView(discord.ui.LayoutView):
                     "\n".join(
                         [
                             f"{index}. `{entry.get('id', 'unknown')}`",
-                            f"- Source: `{entry.get('source_guild_name', 'Unknown Source')}`",
-                            f"- Created: `{format_backup_timestamp(entry.get('created_at'))}`",
+                            f"• Source: `{entry.get('source_guild_name', 'Unknown Source')}`",
+                            f"• Created: `{format_backup_timestamp(entry.get('created_at'))}`",
                         ]
                     )
                 )
@@ -2498,22 +2498,17 @@ class BackupListCardView(discord.ui.LayoutView):
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Vault Feed"),
                     discord.ui.TextDisplay(
-                        f"`{len(self.entries)}/{self.backup_limit}` private backups stored\n"
-                        f"`{len(page_entries)}` backup ID ready for restore on this page."
+                        f"`{len(page_entries)}` backup ID ready for restore"
                     ),
-                    accessory=count_badge,
+                    accessory=discord.ui.Button(label="Private", style=discord.ButtonStyle.secondary, disabled=True),
                 ),
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Your Backups"),
                     discord.ui.TextDisplay(
-                        f"Current page: `{self.page + 1}` / `{self.max_page_index + 1}`\n"
-                        "Pick one from the selector below to unlock the saved structure preview."
+                        f"Current page: `{self.page + 1}` / `{self.max_page_index + 1}`\n\n"
+                        f"{chr(10).join(page_feed_blocks[:4]) if page_feed_blocks else '- No backups on this page.'}"
                     ),
-                    accessory=discord.ui.Button(label="Private", style=discord.ButtonStyle.secondary, disabled=True),
-                ),
-                discord.ui.TextDisplay(
-                    "### Backup IDs\n"
-                    f"{chr(10).join(page_feed_blocks[:8]) if page_feed_blocks else '- No backups on this page.'}"
+                    accessory=count_badge,
                 ),
                 accent_color=EMBED_INFO,
             )
