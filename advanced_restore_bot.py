@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
@@ -87,6 +88,15 @@ R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID") or os.getenv("AWS_ACCESS_KEY_ID
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY")
 R2_REGION = os.getenv("R2_REGION", "auto")
 R2_PREFIX = (os.getenv("R2_PREFIX", "clinx-backups") or "clinx-backups").strip("/ ")
+DISPLAY_TIMEZONE = os.getenv("DISPLAY_TIMEZONE", "Asia/Calcutta")
+DISPLAY_TIMEZONE_LABEL = os.getenv(
+    "DISPLAY_TIMEZONE_LABEL",
+    "IST" if DISPLAY_TIMEZONE == "Asia/Calcutta" else DISPLAY_TIMEZONE,
+)
+try:
+    DISPLAY_TZ = ZoneInfo(DISPLAY_TIMEZONE)
+except Exception:
+    DISPLAY_TZ = timezone.utc
 
 EMBED_OK = 0x22C55E
 EMBED_WARN = 0xFACC15
@@ -97,6 +107,7 @@ IMPORT_JOBS: dict[int, dict[str, Any]] = {}
 BACKUP_LOAD_JOBS: dict[int, dict[str, Any]] = {}
 PENDING_SAFETY_REQUESTS: dict[int, dict[str, Any]] = {}
 _BACKUP_STORAGE_BACKEND: Any = None
+_R2_SHARED_CLIENT: Any = None
 
 
 def utc_now_iso() -> str:
@@ -192,18 +203,71 @@ def save_backup_store(store: dict[str, Any]) -> None:
 
 def load_safety_store() -> dict[str, Any]:
     ensure_storage()
-    store = json.loads(SAFETY_FILE.read_text(encoding="utf-8"))
-    if not isinstance(store.get("guilds"), dict):
-        store = {"guilds": {}}
-        save_safety_store(store)
-    return store
+    local_store = json.loads(SAFETY_FILE.read_text(encoding="utf-8"))
+    local_store, local_changed = normalize_safety_store(local_store)
+
+    if is_r2_backup_storage_enabled():
+        try:
+            remote_store = read_r2_json(get_safety_store_r2_key(), None)
+        except Exception:
+            remote_store = None
+        if isinstance(remote_store, dict):
+            remote_store, remote_changed = normalize_safety_store(remote_store)
+            serialized_remote = json.dumps(remote_store, indent=2)
+            if remote_changed:
+                write_r2_json(get_safety_store_r2_key(), remote_store)
+            if not SAFETY_FILE.exists() or SAFETY_FILE.read_text(encoding="utf-8") != serialized_remote:
+                SAFETY_FILE.write_text(serialized_remote, encoding="utf-8")
+            return remote_store
+
+        serialized_local = json.dumps(local_store, indent=2)
+        if local_changed or not SAFETY_FILE.exists() or SAFETY_FILE.read_text(encoding="utf-8") != serialized_local:
+            SAFETY_FILE.write_text(serialized_local, encoding="utf-8")
+        try:
+            write_r2_json(get_safety_store_r2_key(), local_store)
+        except Exception:
+            pass
+        return local_store
+
+    if local_changed:
+        SAFETY_FILE.write_text(json.dumps(local_store, indent=2), encoding="utf-8")
+    return local_store
 
 
 def save_safety_store(store: dict[str, Any]) -> None:
     ensure_storage()
+    store, _ = normalize_safety_store(store)
+    serialized = json.dumps(store, indent=2)
+    SAFETY_FILE.write_text(serialized, encoding="utf-8")
+    if is_r2_backup_storage_enabled():
+        try:
+            write_r2_json(get_safety_store_r2_key(), store)
+        except Exception:
+            pass
+
+
+def normalize_safety_store(store: dict[str, Any] | Any) -> tuple[dict[str, Any], bool]:
+    changed = False
+    if not isinstance(store, dict):
+        return {"guilds": {}}, True
     if not isinstance(store.get("guilds"), dict):
         store["guilds"] = {}
-    SAFETY_FILE.write_text(json.dumps(store, indent=2), encoding="utf-8")
+        changed = True
+    guilds = store["guilds"]
+    for guild_key in list(guilds.keys()):
+        if not isinstance(guilds[guild_key], dict):
+            guilds[guild_key] = {}
+            changed = True
+        try:
+            guild_id = int(guild_key)
+        except ValueError:
+            continue
+        before = json.dumps(guilds[guild_key], sort_keys=True)
+        get_guild_safety_bucket(store, guild_id)
+        after = json.dumps(guilds[guild_key], sort_keys=True)
+        if before != after:
+            changed = True
+    return store, changed
 
 
 def get_guild_safety_bucket(store: dict[str, Any], guild_id: int) -> dict[str, Any]:
@@ -274,7 +338,7 @@ def format_backup_timestamp(created_at: str | None) -> str:
         dt = datetime.fromisoformat(created_at)
     except ValueError:
         return "Unknown time"
-    return dt.astimezone(timezone.utc).strftime("%d %b %Y - %H:%M UTC")
+    return dt.astimezone(DISPLAY_TZ).strftime(f"%d %b %Y - %H:%M {DISPLAY_TIMEZONE_LABEL}")
 
 
 def parse_iso_timestamp(value: str | None) -> datetime | None:
@@ -389,6 +453,50 @@ def is_r2_backup_storage_enabled() -> bool:
     return all([R2_BACKUP_BUCKET, R2_ENDPOINT_URL, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY])
 
 
+def get_r2_client() -> Any:
+    global _R2_SHARED_CLIENT
+    if _R2_SHARED_CLIENT is None:
+        import boto3
+
+        _R2_SHARED_CLIENT = boto3.client(
+            "s3",
+            endpoint_url=R2_ENDPOINT_URL,
+            aws_access_key_id=R2_ACCESS_KEY_ID,
+            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+            region_name=R2_REGION,
+        )
+    return _R2_SHARED_CLIENT
+
+
+def get_safety_store_r2_key() -> str:
+    return f"{R2_PREFIX}/system/safety.json"
+
+
+def read_r2_json(key: str, default: Any) -> Any:
+    from botocore.exceptions import ClientError
+
+    client = get_r2_client()
+    try:
+        response = client.get_object(Bucket=R2_BACKUP_BUCKET, Key=key)
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code")
+        if error_code in {"NoSuchKey", "404", "NotFound"}:
+            return default
+        raise
+    body = response["Body"].read()
+    return json.loads(body.decode("utf-8"))
+
+
+def write_r2_json(key: str, payload: Any) -> None:
+    client = get_r2_client()
+    client.put_object(
+        Bucket=R2_BACKUP_BUCKET,
+        Key=key,
+        Body=json.dumps(payload, indent=2).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
 class LocalBackupStorageBackend:
     def list_user_backups(self, user_id: int) -> list[dict[str, Any]]:
         store = load_backup_store()
@@ -433,15 +541,7 @@ class R2BackupStorageBackend:
 
     def _get_client(self) -> Any:
         if self._client is None:
-            import boto3
-
-            self._client = boto3.client(
-                "s3",
-                endpoint_url=R2_ENDPOINT_URL,
-                aws_access_key_id=R2_ACCESS_KEY_ID,
-                aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-                region_name=R2_REGION,
-            )
+            self._client = get_r2_client()
         return self._client
 
     def _manifest_key(self, user_id: int | str) -> str:
@@ -451,27 +551,10 @@ class R2BackupStorageBackend:
         return f"{R2_PREFIX}/users/{user_id}/backups/{backup_id}.json"
 
     def _read_json(self, key: str, default: Any) -> Any:
-        from botocore.exceptions import ClientError
-
-        client = self._get_client()
-        try:
-            response = client.get_object(Bucket=R2_BACKUP_BUCKET, Key=key)
-        except ClientError as exc:
-            error_code = exc.response.get("Error", {}).get("Code")
-            if error_code in {"NoSuchKey", "404", "NotFound"}:
-                return default
-            raise
-        body = response["Body"].read()
-        return json.loads(body.decode("utf-8"))
+        return read_r2_json(key, default)
 
     def _write_json(self, key: str, payload: Any) -> None:
-        client = self._get_client()
-        client.put_object(
-            Bucket=R2_BACKUP_BUCKET,
-            Key=key,
-            Body=json.dumps(payload, indent=2).encode("utf-8"),
-            ContentType="application/json",
-        )
+        write_r2_json(key, payload)
 
     def _delete_key(self, key: str) -> None:
         client = self._get_client()
