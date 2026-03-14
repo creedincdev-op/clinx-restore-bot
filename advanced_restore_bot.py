@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import time
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -79,6 +80,7 @@ PREMIUM_PLAN_CATALOG: dict[str, dict[str, Any]] = {
 DATA_DIR = Path(__file__).parent / "data"
 BACKUP_FILE = DATA_DIR / "backups.json"
 SAFETY_FILE = DATA_DIR / "safety.json"
+MESSAGE_ARCHIVE_DIR = DATA_DIR / "message_archives"
 R2_BACKUP_BUCKET = os.getenv("R2_BACKUP_BUCKET")
 R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID")
 R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL") or (
@@ -137,10 +139,165 @@ def make_embed(
 
 def ensure_storage() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    MESSAGE_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     if not BACKUP_FILE.exists():
         BACKUP_FILE.write_text(json.dumps({"backups": {}, "users": {}}, indent=2), encoding="utf-8")
     if not SAFETY_FILE.exists():
         SAFETY_FILE.write_text(json.dumps({"guilds": {}}, indent=2), encoding="utf-8")
+
+
+def slugify_archive_name(raw: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-_.")
+    return cleaned[:80] or "item"
+
+
+def serialize_message_record(message: discord.Message) -> dict[str, Any]:
+    return {
+        "id": message.id,
+        "type": str(message.type),
+        "created_at": message.created_at.isoformat() if message.created_at else None,
+        "edited_at": message.edited_at.isoformat() if message.edited_at else None,
+        "author": {
+            "id": message.author.id,
+            "name": str(message.author),
+            "display_name": getattr(message.author, "display_name", str(message.author)),
+            "bot": message.author.bot,
+        },
+        "content": message.content,
+        "clean_content": message.clean_content,
+        "system_content": message.system_content,
+        "pinned": message.pinned,
+        "jump_url": message.jump_url,
+        "mentions": [member.id for member in message.mentions],
+        "role_mentions": [role.id for role in message.role_mentions],
+        "channel_mentions": [channel.id for channel in message.channel_mentions],
+        "attachments": [
+            {
+                "id": attachment.id,
+                "filename": attachment.filename,
+                "content_type": attachment.content_type,
+                "size": attachment.size,
+                "url": attachment.url,
+                "proxy_url": attachment.proxy_url,
+                "spoiler": attachment.is_spoiler(),
+            }
+            for attachment in message.attachments
+        ],
+        "embeds": [embed.to_dict() for embed in message.embeds],
+        "stickers": [
+            {
+                "id": sticker.id,
+                "name": sticker.name,
+                "format": str(sticker.format),
+            }
+            for sticker in message.stickers
+        ],
+        "reactions": [
+            {
+                "emoji": str(reaction.emoji),
+                "count": reaction.count,
+            }
+            for reaction in message.reactions
+        ],
+    }
+
+
+def can_read_channel_history(channel: discord.abc.GuildChannel | discord.Thread, me: discord.Member | None) -> bool:
+    if me is None:
+        return False
+    permissions = channel.permissions_for(me)
+    return permissions.view_channel and permissions.read_message_history
+
+
+async def get_backup_message_targets(guild: discord.Guild) -> list[discord.abc.Messageable]:
+    me = guild.me or guild.get_member(bot.user.id if bot.user else 0)
+    targets: list[discord.abc.Messageable] = []
+    seen_ids: set[int] = set()
+
+    for channel in sorted(guild.text_channels, key=lambda item: (item.position, item.id)):
+        if not can_read_channel_history(channel, me):
+            continue
+        targets.append(channel)
+        seen_ids.add(channel.id)
+
+    for thread in sorted(guild.threads, key=lambda item: (item.parent_id or 0, item.id)):
+        if thread.id in seen_ids or not can_read_channel_history(thread, me):
+            continue
+        targets.append(thread)
+        seen_ids.add(thread.id)
+
+    return targets
+
+
+async def build_message_archive_for_guild(
+    guild: discord.Guild,
+    *,
+    requested_by: discord.abc.User,
+    progress_hook: Any = None,
+) -> tuple[Path, dict[str, Any]]:
+    ensure_storage()
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    archive_name = f"{slugify_archive_name(guild.name)}-{guild.id}-{timestamp}.zip"
+    archive_path = MESSAGE_ARCHIVE_DIR / archive_name
+
+    targets = await get_backup_message_targets(guild)
+    summary: dict[str, Any] = {
+        "guild": {
+            "id": guild.id,
+            "name": guild.name,
+            "icon_url": guild.icon.url if guild.icon else None,
+        },
+        "created_at": utc_now_iso(),
+        "requested_by": {
+            "id": requested_by.id,
+            "name": str(requested_by),
+        },
+        "channel_count": 0,
+        "message_count": 0,
+        "channels": [],
+    }
+
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index, target in enumerate(targets, start=1):
+            parent_name = getattr(getattr(target, "category", None), "name", None)
+            if isinstance(target, discord.Thread):
+                parent_name = target.parent.name if target.parent else parent_name
+            if progress_hook is not None:
+                await progress_hook(f"Scanning `{target.name}` ({index}/{len(targets)})")
+
+            messages: list[dict[str, Any]] = []
+            async for message in target.history(limit=None, oldest_first=True):
+                messages.append(serialize_message_record(message))
+
+            channel_payload = {
+                "id": target.id,
+                "name": target.name,
+                "type": str(target.type),
+                "parent": parent_name,
+                "message_count": len(messages),
+                "messages": messages,
+            }
+            summary["channels"].append(
+                {
+                    "id": target.id,
+                    "name": target.name,
+                    "type": str(target.type),
+                    "parent": parent_name,
+                    "message_count": len(messages),
+                }
+            )
+            summary["channel_count"] += 1
+            summary["message_count"] += len(messages)
+
+            safe_name = slugify_archive_name(f"{index:03d}-{target.name}-{target.id}")
+            archive.writestr(
+                f"channels/{safe_name}.json",
+                json.dumps(channel_payload, indent=2, ensure_ascii=False),
+            )
+
+        archive.writestr("summary.json", json.dumps(summary, indent=2, ensure_ascii=False))
+
+    return archive_path, summary
 
 
 def normalize_backup_store(store: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -6004,6 +6161,81 @@ async def dev_gift(ctx: commands.Context, member: discord.Member, *, plan_text: 
             entitlement=entitlement,
         )
     )
+
+
+@bot.command(name="backupmessages", hidden=True)
+async def dev_backup_messages(ctx: commands.Context, guild_id: int | None = None) -> None:
+    if not is_developer_user(ctx.author):
+        return
+
+    target_guild = ctx.guild if guild_id is None else bot.get_guild(guild_id)
+    if target_guild is None:
+        await send_temp_prefix_notice(ctx, "Message Backup Failed", "Target guild not found.", EMBED_ERR, delay_seconds=5.0)
+        return
+
+    status_message = await ctx.send(
+        embed=make_embed(
+            "Message Backup Started",
+            f"CLINX is scanning accessible text history in `{target_guild.name}` now.",
+            EMBED_INFO,
+        )
+    )
+
+    async def update_progress(text: str) -> None:
+        try:
+            await status_message.edit(embed=make_embed("Message Backup Running", text, EMBED_INFO))
+        except discord.HTTPException:
+            pass
+
+    try:
+        archive_path, summary = await build_message_archive_for_guild(
+            target_guild,
+            requested_by=ctx.author,
+            progress_hook=update_progress,
+        )
+    except discord.Forbidden:
+        await status_message.edit(
+            embed=make_embed(
+                "Message Backup Failed",
+                "CLINX cannot read one or more channels in that server. Check `View Channel` and `Read Message History` permissions.",
+                EMBED_ERR,
+            )
+        )
+        return
+    except Exception as exc:
+        await status_message.edit(
+            embed=make_embed(
+                "Message Backup Failed",
+                f"CLINX hit an exception while archiving messages.\n`{str(exc)[:1500]}`",
+                EMBED_ERR,
+            )
+        )
+        return
+
+    description = (
+        f"Archive ready for `{target_guild.name}`.\n"
+        f"Channels scanned: `{summary['channel_count']}`\n"
+        f"Messages archived: `{summary['message_count']}`\n"
+        f"Saved as: `{archive_path.name}`"
+    )
+
+    dm_sent = False
+    if archive_path.stat().st_size <= 24 * 1024 * 1024:
+        try:
+            await ctx.author.send(
+                embed=make_embed("Message Backup Complete", description, EMBED_OK),
+                file=discord.File(str(archive_path), filename=archive_path.name),
+            )
+            dm_sent = True
+        except discord.HTTPException:
+            dm_sent = False
+
+    if dm_sent:
+        description += "\nDM delivery: `sent`"
+    else:
+        description += "\nDM delivery: `failed or archive too large`"
+
+    await status_message.edit(embed=make_embed("Message Backup Complete", description, EMBED_OK))
 
 
 @bot.command(name="dashboard", hidden=True, aliases=["devpanel"])
