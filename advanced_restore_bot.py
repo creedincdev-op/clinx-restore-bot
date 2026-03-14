@@ -3231,7 +3231,8 @@ class DeveloperDashboardView(discord.ui.LayoutView):
                 self._make_refresh_button(),
             )
         )
-        self.add_item(discord.ui.ActionRow(DeveloperDashboardSelect(self.page_entries, self.selected_key)))
+        if self.page_entries:
+            self.add_item(discord.ui.ActionRow(DeveloperDashboardSelect(self.page_entries, self.selected_key)))
         self.add_item(
             discord.ui.ActionRow(
                 DeveloperDashboardPageButton(label="Previous", delta=-1, disabled=self.page <= 0),
