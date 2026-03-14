@@ -5929,21 +5929,16 @@ async def dev_dashboard(ctx: commands.Context) -> None:
         return
 
     dashboard_view = DeveloperDashboardView(bot, author_id=ctx.author.id)
-    dashboard_embed = make_embed(
-        "Developer Console",
-        "Use the panel below to inspect OBypass and Premium records.",
-        EMBED_INFO,
-    )
     if ctx.guild is None:
-        await ctx.send(embed=dashboard_embed, view=dashboard_view)
+        await ctx.send(view=dashboard_view)
         return
 
     try:
         dm_channel = ctx.author.dm_channel or await ctx.author.create_dm()
-        await dm_channel.send(embed=dashboard_embed, view=dashboard_view)
+        await dm_channel.send(view=dashboard_view)
     except (discord.Forbidden, discord.HTTPException):
         try:
-            await ctx.send(embed=dashboard_embed, view=dashboard_view)
+            await ctx.send(view=dashboard_view)
         except (discord.Forbidden, discord.HTTPException):
             await send_temp_prefix_notice(
                 ctx,
