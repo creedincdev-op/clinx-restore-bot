@@ -1378,7 +1378,7 @@ def get_command_safety_tier(command_name: str, *, selected_actions: set[str] | N
         "export_reactions",
     }:
         return 1
-    if command_name in {"restore_missing", "masschannels", "import_guild"}:
+    if command_name in {"restore_missing", "import_guild"}:
         return 2
     if command_name == "backup_load":
         if selected_actions and {"delete_roles", "delete_channels"} & selected_actions:
@@ -4553,7 +4553,6 @@ COMMAND_LIBRARY_LANES: tuple[CommandLibraryLane, ...] = (
         entries=(
             CommandLibraryEntry("/restore_missing", "Recreate only the missing structure from a source server.", "Creates categories and channels that do not exist yet without wiping the target.", "Public"),
             CommandLibraryEntry("/cleantoday", "Owner-only: delete channels created today.", "Useful for nuked test runs and bad imports. Dry-run unless `confirm=true` is supplied.", "Private"),
-            CommandLibraryEntry("/masschannels", "Paste a layout and bulk-create the structure.", "Reads a copied category and channel layout, then recreates the structure in one pass.", "Public"),
             CommandLibraryEntry("/import guild", "Import a full server snapshot JSON file.", "Runs a structured import job from an exported guild snapshot file.", "Private"),
             CommandLibraryEntry("/import status", "Check the import job state.", "Returns running, finished, or failed status for the active import in this server.", "Private"),
             CommandLibraryEntry("/import cancel", "Cancel the active import job.", "Stops the running import task if a guild import is in progress.", "Private"),
@@ -5416,9 +5415,7 @@ async def cleantoday(interaction: discord.Interaction, confirm: bool = False) ->
     await interaction.followup.send(embed=make_embed("Clean Today Complete", f"Deleted `{deleted}` channels.", EMBED_OK), ephemeral=True)
 
 
-@bot.tree.command(name="masschannels", description="Create channels from pasted layout text")
-@app_commands.default_permissions(administrator=True)
-async def masschannels(interaction: discord.Interaction, layout: str, create_categories: bool = True) -> None:
+async def masschannels_command_disabled(interaction: discord.Interaction, layout: str, create_categories: bool = True) -> None:
     guild = interaction.guild
     if guild is None:
         await interaction.response.send_message(embed=make_embed("Error", "Run this command in a server.", EMBED_ERR), ephemeral=True)
