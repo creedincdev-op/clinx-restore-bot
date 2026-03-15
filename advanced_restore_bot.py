@@ -3465,49 +3465,48 @@ class PremiumGiftCardView(discord.ui.LayoutView):
             else discord.ui.Button(label="CLINX", disabled=True)
         )
         plan = PREMIUM_PLAN_CATALOG[self.entitlement["plan_key"]]
-        feature_lines = "\n".join(f"- ✦ {feature}" for feature in plan["features"])
+        feature_lines = "\n".join(f"- {feature}" for feature in plan["features"])
         gifted_at = format_backup_timestamp(self.entitlement.get("gifted_at"))
         expires_at = format_backup_timestamp(self.entitlement.get("expires_at"))
         subtitle = (
-            f"🎁 {self.gifted_member.mention} just unlocked **{plan['display_name']}** in **{self.guild.name}**."
+            f"{self.gifted_member.mention} now has **{plan['display_name']}** active in **{self.guild.name}**."
         )
         premium_strip = (
-            f"✨ Premium lane engaged • 💠 {plan['badge_label']} badge armed\n"
-            "🚀 Backup caps lifted • 🧩 Advanced server tooling unlocked"
+            f"Plan: **{plan['display_name']}**  •  Scope: **{self.guild.name}**\n"
+            f"Billing: **Monthly**  •  Renews: **{expires_at}**"
         )
         payload_text = (
-            f"🎯 Recipient: {self.gifted_member.mention}\n"
-            f"📦 Plan Lane: `{plan['display_name']}`\n"
-            f"💳 Value: `{plan['price_label']}`\n"
-            f"🏰 Scope: `{self.guild.name}`"
+            f"Recipient: {self.gifted_member.mention}\n"
+            f"Plan: **{plan['display_name']}**\n"
+            f"Value: **{plan['price_label']}**\n"
+            f"Tier Badge: **{plan['badge_label']}**"
         )
         activation_text = (
-            "### 🔐 Activation Status\n"
-            f"- 👑 Gifted by: <@{self.gifted_by_id}>\n"
-            f"- 🕒 Activated: `{gifted_at}`\n"
-            f"- 🗓 Billing: `Monthly` · Renews: `{expires_at}`\n"
-            "- 🌐 Guild premium is now active for CLINX-permitted members in this server.\n"
-            "- 🛡 Safety gates and owner approval rules still apply where required."
+            "### Activation Status\n"
+            f"- Gifted by: <@{self.gifted_by_id}>\n"
+            f"- Activated: **{gifted_at}**\n"
+            "- Guild premium is now active for CLINX-permitted members in this server.\n"
+            "- Safety gates and owner approval rules still apply where required."
         )
         self.add_item(
             discord.ui.Container(
                 discord.ui.Section(
-                    discord.ui.TextDisplay("## ✦ Premium Gift Delivered"),
+                    discord.ui.TextDisplay("## Premium Gift Delivered"),
                     discord.ui.TextDisplay(subtitle),
                     discord.ui.TextDisplay(premium_strip),
                     accessory=hero,
                 ),
                 discord.ui.Separator(),
                 discord.ui.Section(
-                    discord.ui.TextDisplay("### 🎁 Gift Payload"),
+                    discord.ui.TextDisplay("### Gift Payload"),
                     discord.ui.TextDisplay(payload_text),
                     accessory=discord.ui.Button(
                         label=plan["badge_label"],
-                        style=discord.ButtonStyle.success,
+                        style=discord.ButtonStyle.primary,
                         disabled=True,
                     ),
                 ),
-                discord.ui.TextDisplay(f"### ✨ Included\n{feature_lines}"),
+                discord.ui.TextDisplay(f"### Included\n{feature_lines}"),
                 discord.ui.TextDisplay(activation_text),
                 accent_color=0x4F8CFF,
             )
