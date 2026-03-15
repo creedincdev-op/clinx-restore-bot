@@ -3275,39 +3275,44 @@ class PremiumGiftCardView(discord.ui.LayoutView):
             else discord.ui.Button(label="CLINX", disabled=True)
         )
         plan = PREMIUM_PLAN_CATALOG[self.entitlement["plan_key"]]
-        feature_lines = "\n".join(f"- {feature}" for feature in plan["features"])
+        feature_lines = "\n".join(f"- ✦ {feature}" for feature in plan["features"])
         gifted_at = format_backup_timestamp(self.entitlement.get("gifted_at"))
+        subtitle = (
+            f"🎁 {self.gifted_member.mention} just unlocked **{plan['display_name']}** in **{self.guild.name}**."
+        )
+        payload_text = (
+            f"🎯 Recipient: {self.gifted_member.mention}\n"
+            f"📦 Plan: `{plan['display_name']}`\n"
+            f"💳 Value: `{plan['price_label']}`\n"
+            f"🏰 Scope: `{self.guild.name}`"
+        )
+        activation_text = (
+            "### Activation Status\n"
+            f"- 👑 Gifted by: <@{self.gifted_by_id}>\n"
+            f"- 🕒 Activated: `{gifted_at}`\n"
+            "- 🌐 Guild premium is now active for CLINX-permitted members in this server.\n"
+            "- 🛡 Safety gates and owner approval rules still apply where required."
+        )
         self.add_item(
             discord.ui.Container(
                 discord.ui.Section(
-                    discord.ui.TextDisplay("## <> Premium Gift Delivered"),
-                    discord.ui.TextDisplay(
-                        f"{self.gifted_member.mention} just got **{plan['display_name']}** for this server."
-                    ),
+                    discord.ui.TextDisplay("## ✦ Premium Gift Delivered"),
+                    discord.ui.TextDisplay(subtitle),
                     accessory=hero,
                 ),
                 discord.ui.Separator(),
                 discord.ui.Section(
-                    discord.ui.TextDisplay("### Gift Payload"),
-                    discord.ui.TextDisplay(
-                        f"Recipient: {self.gifted_member.mention}\n"
-                        f"Plan: `{plan['display_name']}`\n"
-                        f"Value: `{plan['price_label']}`"
-                    ),
+                    discord.ui.TextDisplay("### 🎁 Gift Payload"),
+                    discord.ui.TextDisplay(payload_text),
                     accessory=discord.ui.Button(
                         label=plan["badge_label"],
-                        style=discord.ButtonStyle.primary,
+                        style=discord.ButtonStyle.success,
                         disabled=True,
                     ),
                 ),
-                discord.ui.TextDisplay(f"### Included\n{feature_lines}"),
-                discord.ui.TextDisplay(
-                    "### Scope\n"
-                    "- Guild premium is now active for CLINX-permitted members in this server.\n"
-                    "- Safety gates and owner approval rules still apply where required.\n"
-                    f"- Gifted by: <@{self.gifted_by_id}> · Activated: `{gifted_at}`"
-                ),
-                accent_color=EMBED_INFO,
+                discord.ui.TextDisplay(f"### ✨ Included\n{feature_lines}"),
+                discord.ui.TextDisplay(activation_text),
+                accent_color=0x4F8CFF,
             )
         )
 
