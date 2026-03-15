@@ -78,6 +78,12 @@ PREMIUM_PLAN_CATALOG: dict[str, dict[str, Any]] = {
         ),
     },
 }
+PREMIUM_CARD_THEMES: dict[str, dict[str, Any]] = {
+    "free": {"title": "Base Access Card", "metal": "Core", "accent": 0x5B8CFF, "badge": "Core"},
+    "pro": {"title": "Bronze Access Card", "metal": "Bronze", "accent": 0xB57A45, "badge": "Bronze"},
+    "pro_plus": {"title": "Silver Access Card", "metal": "Silver", "accent": 0xAEB8C7, "badge": "Silver"},
+    "pro_ultra": {"title": "Gold Access Card", "metal": "Gold", "accent": 0xD4AF37, "badge": "Gold"},
+}
 
 DATA_DIR = Path(__file__).parent / "data"
 BACKUP_FILE = DATA_DIR / "backups.json"
@@ -3328,6 +3334,82 @@ class PingCardView(discord.ui.LayoutView):
         )
 
 
+class PremiumStatusCardView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        bot_user: discord.ClientUser | None,
+        guild: discord.Guild,
+        *,
+        entitlement: dict[str, Any] | None,
+    ) -> None:
+        super().__init__(timeout=None)
+        self.bot_user = bot_user
+        self.guild = guild
+        self.entitlement = entitlement
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        self.clear_items()
+        hero = (
+            discord.ui.Thumbnail(self.bot_user.display_avatar.url)
+            if self.bot_user
+            else discord.ui.Button(label="CLINX", disabled=True)
+        )
+        entitlement = enrich_premium_entitlement(self.entitlement) or {"plan_key": "free", "state": "free"}
+        plan_key = str(entitlement.get("plan_key") or "free")
+        theme = PREMIUM_CARD_THEMES.get(plan_key, PREMIUM_CARD_THEMES["free"])
+        plan = PREMIUM_PLAN_CATALOG.get(plan_key)
+        state = str(entitlement.get("state") or "free")
+        server_name = self.guild.name.strip() if getattr(self.guild, "name", "") else "This Server"
+        plan_name = str(entitlement.get("plan_name") or (plan["display_name"] if plan else "Free"))
+        billing_line = (
+            f"Renews {format_backup_timestamp(entitlement.get('expires_at'))}"
+            if state == "active" else
+            f"Grace until {format_backup_timestamp(entitlement.get('grace_ends_at'))}"
+            if state == "grace" else
+            "Free lane active"
+        )
+        backup_cap = PLAN_BACKUP_LIMITS.get(plan_key, PLAN_BACKUP_LIMITS["free"])
+        access_label = (
+            "Premium Live" if state == "active" else
+            "Grace Window" if state == "grace" else
+            "Free Lane"
+        )
+        detail_lines = [
+            f"**Tier**  {plan_name}",
+            f"**Server**  {server_name}",
+            f"**Vault**  {backup_cap} slots",
+            f"**State**  {access_label}",
+            f"**Billing**  {billing_line}",
+        ]
+        if state == "expired":
+            detail_lines.append("**Retention**  Backups above the free cap are now at risk")
+        elif state == "active":
+            detail_lines.append("**Access**  Premium tooling is live for CLINX-permitted members")
+        else:
+            detail_lines.append("**Access**  Renew to restore premium backup creation limits")
+
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.Section(
+                    discord.ui.TextDisplay(f"## {theme['title']}"),
+                    discord.ui.TextDisplay(f"{theme['metal']} tier issued for **{server_name}**"),
+                    discord.ui.TextDisplay("────────────"),
+                    accessory=hero,
+                ),
+                discord.ui.Section(
+                    discord.ui.TextDisplay("\n".join(detail_lines)),
+                    accessory=discord.ui.Button(
+                        label=str(theme["badge"]),
+                        style=discord.ButtonStyle.primary if state == "active" else discord.ButtonStyle.secondary,
+                        disabled=True,
+                    ),
+                ),
+                accent_color=int(theme["accent"]),
+            )
+        )
+
+
 class SafetyRosterCardView(discord.ui.LayoutView):
     def __init__(
         self,
@@ -4844,6 +4926,7 @@ COMMAND_LIBRARY_LANES: tuple[CommandLibraryLane, ...] = (
         blurb="Operator-facing panels and public bot surfaces.",
         entries=(
             CommandLibraryEntry("/help", "Get a list of commands or more information about a specific command.", "Browse command lanes, page through the catalog, and inspect each command in a single surface.", "Public"),
+            CommandLibraryEntry("/premium", "Show the active premium card for this server.", "Displays the current CLINX premium tier, vault cap, billing state, and retention window in a compact status card.", "Public"),
             CommandLibraryEntry("/invite", "Get the bot invite link.", "Returns the OAuth invite for CLINX with bot and slash command scopes.", "Public"),
             CommandLibraryEntry("/leave", "Make CLINX leave the current server.", "Tells the bot to exit the server immediately after confirmation.", "Private"),
         ),
@@ -6200,6 +6283,24 @@ async def ping(interaction: discord.Interaction) -> None:
         view=PingCardView(
             interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
             latency_ms=latency_ms,
+        )
+    )
+
+
+@bot.tree.command(name="premium", description="Show the active CLINX premium card for this server")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+async def premium(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(embed=make_embed("Error", "Run this command in a server.", EMBED_ERR), ephemeral=True)
+        return
+    entitlement = get_guild_premium_entitlement(guild.id)
+    await interaction.response.send_message(
+        view=PremiumStatusCardView(
+            interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
+            guild,
+            entitlement=entitlement,
         )
     )
 
