@@ -2719,11 +2719,13 @@ class BackupCreatedCardView(discord.ui.LayoutView):
                 discord.ui.TextDisplay(f"**{self.backup_id}**"),
                 accessory=discord.ui.Button(label="Ready", style=discord.ButtonStyle.success, disabled=True),
             ),
+            discord.ui.Separator(),
             discord.ui.Section(
                 discord.ui.TextDisplay("### Source"),
                 discord.ui.TextDisplay(f"**{source_label}**"),
                 accessory=discord.ui.Button(label="Private", style=discord.ButtonStyle.secondary, disabled=True),
             ),
+            discord.ui.Separator(),
             discord.ui.Section(
                 discord.ui.TextDisplay("### Snapshot Payload"),
                 discord.ui.TextDisplay(
@@ -2733,6 +2735,7 @@ class BackupCreatedCardView(discord.ui.LayoutView):
                 ),
                 accessory=discord.ui.Button(label="Vault", style=discord.ButtonStyle.primary, disabled=True),
             ),
+            discord.ui.Separator(),
             discord.ui.TextDisplay(
                 "### Restore Profile\n"
                 "- Roles, channels, categories, overwrites, and server settings were captured.\n"
