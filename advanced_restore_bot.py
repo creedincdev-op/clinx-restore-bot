@@ -209,16 +209,48 @@ def can_read_channel_history(channel: discord.abc.GuildChannel | discord.Thread,
     return permissions.view_channel and permissions.read_message_history
 
 
+async def collect_archived_threads_for_channel(channel: Any) -> list[discord.Thread]:
+    if not hasattr(channel, "archived_threads"):
+        return []
+
+    results: list[discord.Thread] = []
+    seen_ids: set[int] = set()
+
+    async def consume(**kwargs: Any) -> None:
+        try:
+            async for thread in channel.archived_threads(limit=None, **kwargs):
+                if thread.id in seen_ids:
+                    continue
+                seen_ids.add(thread.id)
+                results.append(thread)
+        except TypeError:
+            return
+        except (discord.Forbidden, discord.HTTPException):
+            return
+
+    await consume(private=False)
+    await consume(private=True, joined=True)
+    return results
+
+
 async def get_backup_message_targets(guild: discord.Guild) -> list[discord.abc.Messageable]:
     me = guild.me or guild.get_member(bot.user.id if bot.user else 0)
     targets: list[discord.abc.Messageable] = []
     seen_ids: set[int] = set()
+    thread_parent_channels: list[Any] = []
 
     for channel in sorted(guild.text_channels, key=lambda item: (item.position, item.id)):
         if not can_read_channel_history(channel, me):
             continue
         targets.append(channel)
         seen_ids.add(channel.id)
+        thread_parent_channels.append(channel)
+
+    for forum_channel in sorted(getattr(guild, "forums", []), key=lambda item: (item.position, item.id)):
+        thread_parent_channels.append(forum_channel)
+
+    for media_channel in sorted(getattr(guild, "media_channels", []), key=lambda item: (item.position, item.id)):
+        thread_parent_channels.append(media_channel)
 
     for thread in sorted(guild.threads, key=lambda item: (item.parent_id or 0, item.id)):
         if thread.id in seen_ids or not can_read_channel_history(thread, me):
@@ -226,7 +258,18 @@ async def get_backup_message_targets(guild: discord.Guild) -> list[discord.abc.M
         targets.append(thread)
         seen_ids.add(thread.id)
 
+    for parent_channel in thread_parent_channels:
+        for thread in await collect_archived_threads_for_channel(parent_channel):
+            if thread.id in seen_ids or not can_read_channel_history(thread, me):
+                continue
+            targets.append(thread)
+            seen_ids.add(thread.id)
+
     return targets
+
+
+def build_message_archive_r2_key(guild: discord.Guild, archive_name: str) -> str:
+    return f"{R2_PREFIX}/message-archives/{guild.id}/{archive_name}"
 
 
 async def build_message_archive_for_guild(
@@ -253,8 +296,13 @@ async def build_message_archive_for_guild(
             "name": str(requested_by),
         },
         "channel_count": 0,
+        "thread_count": 0,
         "message_count": 0,
         "channels": [],
+        "storage": {
+            "local_path": str(archive_path),
+            "r2_key": None,
+        },
     }
 
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -287,6 +335,8 @@ async def build_message_archive_for_guild(
                 }
             )
             summary["channel_count"] += 1
+            if isinstance(target, discord.Thread):
+                summary["thread_count"] += 1
             summary["message_count"] += len(messages)
 
             safe_name = slugify_archive_name(f"{index:03d}-{target.name}-{target.id}")
@@ -296,6 +346,12 @@ async def build_message_archive_for_guild(
             )
 
         archive.writestr("summary.json", json.dumps(summary, indent=2, ensure_ascii=False))
+
+    if is_r2_backup_storage_enabled():
+        archive_bytes = archive_path.read_bytes()
+        r2_key = build_message_archive_r2_key(guild, archive_path.name)
+        write_r2_bytes(r2_key, archive_bytes, content_type="application/zip")
+        summary["storage"]["r2_key"] = r2_key
 
     return archive_path, summary
 
@@ -651,6 +707,16 @@ def write_r2_json(key: str, payload: Any) -> None:
         Key=key,
         Body=json.dumps(payload, indent=2).encode("utf-8"),
         ContentType="application/json",
+    )
+
+
+def write_r2_bytes(key: str, payload: bytes, *, content_type: str = "application/octet-stream") -> None:
+    client = get_r2_client()
+    client.put_object(
+        Bucket=R2_BACKUP_BUCKET,
+        Key=key,
+        Body=payload,
+        ContentType=content_type,
     )
 
 
@@ -6215,6 +6281,7 @@ async def dev_backup_messages(ctx: commands.Context, guild_id: int | None = None
     description = (
         f"Archive ready for `{target_guild.name}`.\n"
         f"Channels scanned: `{summary['channel_count']}`\n"
+        f"Threads scanned: `{summary['thread_count']}`\n"
         f"Messages archived: `{summary['message_count']}`\n"
         f"Saved as: `{archive_path.name}`"
     )
@@ -6234,6 +6301,8 @@ async def dev_backup_messages(ctx: commands.Context, guild_id: int | None = None
         description += "\nDM delivery: `sent`"
     else:
         description += "\nDM delivery: `failed or archive too large`"
+    if summary.get("storage", {}).get("r2_key"):
+        description += f"\nCloud storage: `{summary['storage']['r2_key']}`"
 
     await status_message.edit(embed=make_embed("Message Backup Complete", description, EMBED_OK))
 
