@@ -209,6 +209,16 @@ def can_read_channel_history(channel: discord.abc.GuildChannel | discord.Thread,
     return permissions.view_channel and permissions.read_message_history
 
 
+async def channel_has_user_messages(channel: discord.TextChannel) -> bool:
+    try:
+        async for message in channel.history(limit=None, oldest_first=False):
+            if not message.author.bot:
+                return True
+    except (discord.Forbidden, discord.HTTPException):
+        return True
+    return False
+
+
 async def collect_archived_threads_for_channel(channel: Any) -> list[discord.Thread]:
     if not hasattr(channel, "archived_threads"):
         return []
@@ -1384,7 +1394,7 @@ def get_command_safety_tier(command_name: str, *, selected_actions: set[str] | N
         if selected_actions and {"delete_roles", "delete_channels"} & selected_actions:
             return 3
         return 2
-    if command_name in {"leave", "safety_grant", "safety_revoke", "safety_list", "cleantoday"}:
+    if command_name in {"leave", "safety_grant", "safety_revoke", "safety_list", "cleantoday", "cleanempty"}:
         return 4
     return 1
 
@@ -4553,6 +4563,7 @@ COMMAND_LIBRARY_LANES: tuple[CommandLibraryLane, ...] = (
         entries=(
             CommandLibraryEntry("/restore_missing", "Recreate only the missing structure from a source server.", "Creates categories and channels that do not exist yet without wiping the target.", "Public"),
             CommandLibraryEntry("/cleantoday", "Owner-only: delete channels created today.", "Useful for nuked test runs and bad imports. Dry-run unless `confirm=true` is supplied.", "Private"),
+            CommandLibraryEntry("/cleanempty", "Owner-only: delete text channels with no user messages.", "Scans text channels, deletes ones with no non-bot messages, and can remove categories whose entire channel tree is empty.", "Private"),
             CommandLibraryEntry("/import guild", "Import a full server snapshot JSON file.", "Runs a structured import job from an exported guild snapshot file.", "Private"),
             CommandLibraryEntry("/import status", "Check the import job state.", "Returns running, finished, or failed status for the active import in this server.", "Private"),
             CommandLibraryEntry("/import cancel", "Cancel the active import job.", "Stops the running import task if a guild import is in progress.", "Private"),
@@ -5413,6 +5424,97 @@ async def cleantoday(interaction: discord.Interaction, confirm: bool = False) ->
             pass
 
     await interaction.followup.send(embed=make_embed("Clean Today Complete", f"Deleted `{deleted}` channels.", EMBED_OK), ephemeral=True)
+
+
+@bot.tree.command(name="cleanempty", description="Owner-only: delete text channels with no user messages")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    include_category="Also delete categories whose entire child channel set is empty",
+    confirm="Actually delete the empty channels instead of running a dry scan",
+)
+async def cleanempty(interaction: discord.Interaction, include_category: bool = False, confirm: bool = False) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(embed=make_embed("Error", "Run this command in a server.", EMBED_ERR), ephemeral=True)
+        return
+
+    access_mode, _, message = require_clinx_access(interaction, "cleanempty", destructive=confirm)
+    if access_mode == "deny":
+        await send_access_denied(interaction, message or "You cannot run cleanempty in this server.")
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    me = guild.me or (guild.get_member(bot.user.id) if bot.user else None)
+    text_channels = [
+        channel
+        for channel in sorted(guild.text_channels, key=lambda item: (item.category.position if item.category else -1, item.position, item.id))
+        if can_read_channel_history(channel, me)
+    ]
+
+    empty_channels: list[discord.TextChannel] = []
+    unreadable_count = max(0, len(guild.text_channels) - len(text_channels))
+    for channel in text_channels:
+        if not await channel_has_user_messages(channel):
+            empty_channels.append(channel)
+
+    empty_channel_ids = {channel.id for channel in empty_channels}
+    empty_categories: list[discord.CategoryChannel] = []
+    if include_category:
+        for category in sorted(guild.categories, key=lambda item: (item.position, item.id)):
+            if category.channels and all(child.id in empty_channel_ids for child in category.channels):
+                empty_categories.append(category)
+
+    if not empty_channels and not empty_categories:
+        detail = "No empty text channels were found."
+        if unreadable_count:
+            detail += f"\nUnreadable text channels skipped: `{unreadable_count}`"
+        await interaction.followup.send(embed=make_embed("Clean Empty", detail, EMBED_INFO), ephemeral=True)
+        return
+
+    if not confirm:
+        lines = [
+            f"Scanned text channels: `{len(text_channels)}`",
+            f"Empty text channels: `{len(empty_channels)}`",
+        ]
+        if include_category:
+            lines.append(f"Empty categories: `{len(empty_categories)}`")
+        if unreadable_count:
+            lines.append(f"Unreadable text channels skipped: `{unreadable_count}`")
+        lines.append("")
+        lines.append("Run again with `confirm=true` to delete the empty channels.")
+        await interaction.followup.send(embed=make_embed("Clean Empty Dry Run", "\n".join(lines), EMBED_WARN), ephemeral=True)
+        return
+
+    deleted_channels = 0
+    failed_channels = 0
+    for channel in sorted(empty_channels, key=lambda item: (item.category.position if item.category else -1, item.position, item.id), reverse=True):
+        try:
+            await channel.delete(reason=f"/cleanempty by {interaction.user}")
+            deleted_channels += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed_channels += 1
+
+    deleted_categories = 0
+    failed_categories = 0
+    if include_category:
+        for category in sorted(empty_categories, key=lambda item: (item.position, item.id), reverse=True):
+            try:
+                await category.delete(reason=f"/cleanempty by {interaction.user}")
+                deleted_categories += 1
+            except (discord.Forbidden, discord.HTTPException):
+                failed_categories += 1
+
+    result_lines = [f"Deleted empty text channels: `{deleted_channels}`"]
+    if include_category:
+        result_lines.append(f"Deleted empty categories: `{deleted_categories}`")
+    if failed_channels:
+        result_lines.append(f"Failed text channels: `{failed_channels}`")
+    if failed_categories:
+        result_lines.append(f"Failed categories: `{failed_categories}`")
+    if unreadable_count:
+        result_lines.append(f"Unreadable text channels skipped: `{unreadable_count}`")
+    await interaction.followup.send(embed=make_embed("Clean Empty Complete", "\n".join(result_lines), EMBED_OK if not (failed_channels or failed_categories) else EMBED_WARN), ephemeral=True)
 
 
 async def masschannels_command_disabled(interaction: discord.Interaction, layout: str, create_categories: bool = True) -> None:
