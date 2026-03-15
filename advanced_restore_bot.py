@@ -3182,6 +3182,7 @@ class BackupListCardView(discord.ui.LayoutView):
                             f"**{index}.** **{entry.get('id', 'unknown')}**",
                             f"↳ Source: **{entry.get('source_guild_name', 'Unknown Source')}**",
                             f"↳ Created: **{format_backup_timestamp(entry.get('created_at'))}**",
+                            "────────────────",
                         ]
                     )
                 )
@@ -3206,7 +3207,8 @@ class BackupListCardView(discord.ui.LayoutView):
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Your Backups"),
                     discord.ui.TextDisplay(
-                        f"Current page: **{self.page + 1} / {self.max_page_index + 1}**\n\n"
+                        f"Current page: **{self.page + 1} / {self.max_page_index + 1}**\n"
+                        "────────────\n\n"
                         f"{chr(10).join(page_feed_blocks[:4]) if page_feed_blocks else '- No backups on this page.'}"
                     ),
                     accessory=count_badge,
