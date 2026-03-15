@@ -3476,7 +3476,7 @@ class PremiumGiftCardView(discord.ui.LayoutView):
         gifted_at = format_backup_timestamp(self.entitlement.get("gifted_at"))
         expires_at = format_backup_timestamp(self.entitlement.get("expires_at"))
         subtitle = (
-            f"{self.gifted_member.mention} now has **{plan['display_name']}** active in **{server_name}**."
+            f"{self.gifted_member.mention} now has **{plan['display_name']}** active for this server."
         )
         premium_strip = (
             f"Plan: **{plan['display_name']}**  •  Server: **{server_name}**\n"
@@ -3516,8 +3516,11 @@ class PremiumGiftCardView(discord.ui.LayoutView):
                         disabled=True,
                     ),
                 ),
+                discord.ui.Separator(),
                 discord.ui.TextDisplay(f"### Included\n{feature_lines}"),
+                discord.ui.Separator(),
                 discord.ui.TextDisplay(activation_text),
+                discord.ui.Separator(),
                 discord.ui.TextDisplay(access_text),
                 accent_color=0x4F8CFF,
             )
