@@ -4912,10 +4912,18 @@ class ClinxBot(commands.Bot):
 bot = ClinxBot(command_prefix=commands.when_mentioned_or("^^^"), intents=intents)
 
 backup_group = app_commands.Group(name="backup", description="Backup and restore commands")
+backup_group = app_commands.allowed_installs(guilds=True, users=False)(backup_group)
+backup_group = app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)(backup_group)
 backup_interval_group = app_commands.Group(name="interval", description="Automatic backup interval controls", parent=backup_group)
 export_group = app_commands.Group(name="export", description="Export server objects")
+export_group = app_commands.allowed_installs(guilds=True, users=False)(export_group)
+export_group = app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)(export_group)
 import_group = app_commands.Group(name="import", description="Import server objects")
+import_group = app_commands.allowed_installs(guilds=True, users=False)(import_group)
+import_group = app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)(import_group)
 safety_group = app_commands.Group(name="safety", description="CLINX trust and approval controls")
+safety_group = app_commands.allowed_installs(guilds=True, users=False)(safety_group)
+safety_group = app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)(safety_group)
 dev_group = app_commands.Group(name="dev", description="Developer-only CLINX controls")
 dev_group = app_commands.allowed_installs(guilds=False, users=True)(dev_group)
 dev_group = app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)(dev_group)
@@ -5279,6 +5287,8 @@ async def backup_cancel(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="restore_missing", description="Restore only missing categories/channels from source")
 @app_commands.describe(source_guild_id="Source guild ID", target_guild_id="Target guild ID")
 @app_commands.default_permissions(administrator=True)
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
 async def restore_missing(interaction: discord.Interaction, source_guild_id: int | None = None, target_guild_id: int | None = None) -> None:
     resolved_source = source_guild_id or resolve_default_backup_guild_id()
     source = bot.get_guild(resolved_source) if resolved_source else None
@@ -5358,6 +5368,8 @@ async def restore_missing(interaction: discord.Interaction, source_guild_id: int
 
 @bot.tree.command(name="cleantoday", description="Owner-only: delete channels created today (UTC)")
 @app_commands.default_permissions(administrator=True)
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
 async def cleantoday(interaction: discord.Interaction, confirm: bool = False) -> None:
     guild = interaction.guild
     if guild is None:
@@ -5428,6 +5440,8 @@ async def cleantoday(interaction: discord.Interaction, confirm: bool = False) ->
 
 @bot.tree.command(name="cleanempty", description="Owner-only: delete text channels with no user messages")
 @app_commands.default_permissions(administrator=True)
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
 @app_commands.describe(
     include_category="Also delete categories whose entire child channel set is empty",
     confirm="Actually delete the empty channels instead of running a dry scan",
@@ -5910,11 +5924,15 @@ async def import_cancel(interaction: discord.Interaction) -> None:
 
 
 @bot.tree.command(name="help", description="Get a list of commands or more information about a specific command")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
 async def help_cmd(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(view=CommandLibraryView(interaction.client.user if isinstance(interaction.client, commands.Bot) else None))
 
 
 @bot.tree.command(name="invite", description="Get bot invite link")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
 async def invite(interaction: discord.Interaction) -> None:
     app_id = bot.user.id if bot.user else None
     link = build_invite_url(app_id)
@@ -5922,6 +5940,8 @@ async def invite(interaction: discord.Interaction) -> None:
 
 
 @bot.tree.command(name="ping", description="Check CLINX gateway latency")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
 async def ping(interaction: discord.Interaction) -> None:
     latency_ms = round(bot.latency * 1000)
     await interaction.response.send_message(
@@ -5934,6 +5954,8 @@ async def ping(interaction: discord.Interaction) -> None:
 
 @bot.tree.command(name="leave", description="Make bot leave this server")
 @app_commands.default_permissions(administrator=True)
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
 async def leave(interaction: discord.Interaction) -> None:
     access_mode, _, message = require_clinx_access(interaction, "leave")
     if access_mode == "deny":
