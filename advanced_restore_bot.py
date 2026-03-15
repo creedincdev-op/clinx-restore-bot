@@ -3464,24 +3464,47 @@ class SafetyRosterCardView(discord.ui.LayoutView):
         roster_lines: list[str] = []
         for index, user_id in enumerate(self.trusted_ids, start=1):
             member = self.guild.get_member(int(user_id))
-            roster_lines.append(f"**{index}.** {member.mention if member else f'`{user_id}`'}")
+            display_target = member.mention if member else user_id
+            roster_lines.append(
+                "\n".join(
+                    [
+                        f"**{index}. {display_target}**",
+                        f"Member ID: {user_id}",
+                    ]
+                )
+            )
         if not roster_lines:
             roster_lines.append("- No trusted CLINX admins are configured in this server.")
+
+        roster_block = ("\n────────────\n").join(roster_lines)
+        trust_count = len(self.trusted_ids)
+        status_strip = (
+            "Owner-governed lane • Trusted admin bypass • Approval-ready"
+        )
 
         self.add_item(
             discord.ui.Container(
                 discord.ui.Section(
                     discord.ui.TextDisplay(f"## <> {self.title}"),
                     discord.ui.TextDisplay(self.subtitle),
+                    discord.ui.TextDisplay(status_strip),
                     accessory=hero,
                 ),
                 discord.ui.Separator(),
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Trust State"),
-                    discord.ui.TextDisplay(f"`{len(self.trusted_ids)}` trusted admin slot(s) configured"),
+                    discord.ui.TextDisplay(
+                        f"**Trusted Admin Slots**\n"
+                        f"{trust_count} trusted admin slot(s) configured"
+                    ),
                     accessory=discord.ui.Button(label=self.badge_label, style=self.badge_style, disabled=True),
                 ),
-                discord.ui.TextDisplay("### Trusted Admins\n" + "\n".join(roster_lines)),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(
+                    "### Trusted Admins\n"
+                    + roster_block
+                ),
+                discord.ui.Separator(),
                 discord.ui.TextDisplay(
                     "### Scope\n"
                     "- Trusted admins bypass owner approval for Tier 2 and Tier 3 CLINX actions.\n"
