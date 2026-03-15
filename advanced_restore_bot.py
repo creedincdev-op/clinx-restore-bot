@@ -2703,36 +2703,40 @@ class BackupCreatedCardView(discord.ui.LayoutView):
         snapshot_roles = len(self.snapshot.get("roles", []))
         snapshot_categories = len(self.snapshot.get("categories", []))
         snapshot_channels = len(self.snapshot.get("channels", []))
+        source_name = self.source.name.strip() if getattr(self.source, "name", "") else "Unknown Server"
+        source_label = f"{source_name} • {self.source.id}"
+        header_strip = "🗂 Snapshot locked • 🔐 Private restore lane • ⚡ Ready to load"
         children: list[discord.ui.Item[Any]] = [
             discord.ui.Section(
                 discord.ui.TextDisplay("## <> Backup Vault Sealed"),
                 discord.ui.TextDisplay("Snapshot locked. This recovery ID is ready for private restore use."),
+                discord.ui.TextDisplay(header_strip),
                 accessory=hero,
             ),
             discord.ui.Separator(),
             discord.ui.Section(
                 discord.ui.TextDisplay("### Load ID"),
-                discord.ui.TextDisplay(f"`{self.backup_id}`"),
+                discord.ui.TextDisplay(f"**{self.backup_id}**"),
                 accessory=discord.ui.Button(label="Ready", style=discord.ButtonStyle.success, disabled=True),
             ),
             discord.ui.Section(
                 discord.ui.TextDisplay("### Source"),
-                discord.ui.TextDisplay(f"`{self.source.name}` ({self.source.id})"),
+                discord.ui.TextDisplay(f"**{source_label}**"),
                 accessory=discord.ui.Button(label="Private", style=discord.ButtonStyle.secondary, disabled=True),
             ),
             discord.ui.Section(
                 discord.ui.TextDisplay("### Snapshot Payload"),
                 discord.ui.TextDisplay(
-                    f"`{snapshot_roles}` roles\n"
-                    f"`{snapshot_categories}` categories\n"
-                    f"`{snapshot_channels}` channels"
+                    f"**{snapshot_roles}** roles\n"
+                    f"**{snapshot_categories}** categories\n"
+                    f"**{snapshot_channels}** channels"
                 ),
                 accessory=discord.ui.Button(label="Vault", style=discord.ButtonStyle.primary, disabled=True),
             ),
             discord.ui.TextDisplay(
                 "### Restore Profile\n"
                 "- Roles, channels, categories, overwrites, and server settings were captured.\n"
-                "- Use `/backup load` to open the planner and apply this snapshot."
+                "- Use **`/backup load`** to open the planner and apply this snapshot."
             ),
         ]
         self.add_item(discord.ui.Container(*children, accent_color=EMBED_INFO))
