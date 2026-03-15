@@ -3208,6 +3208,7 @@ class BackupListCardView(discord.ui.LayoutView):
                     ),
                     accessory=discord.ui.Button(label="Private", style=discord.ButtonStyle.secondary, disabled=True),
                 ),
+                discord.ui.Separator(),
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Your Backups"),
                     discord.ui.TextDisplay(
@@ -3246,6 +3247,7 @@ class BackupListCardView(discord.ui.LayoutView):
                     ),
                     accessory=count_badge,
                 ),
+                discord.ui.Separator(),
                 discord.ui.Section(
                     discord.ui.TextDisplay(f"### Backup Info - {selected_entry.get('source_guild_name', 'Unknown Source')}"),
                     discord.ui.TextDisplay(
@@ -3255,11 +3257,13 @@ class BackupListCardView(discord.ui.LayoutView):
                     ),
                     accessory=vault_badge,
                 ),
+                discord.ui.Separator(),
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Structure Preview"),
                     discord.ui.TextDisplay(format_backup_structure_preview(summary)),
                     accessory=discord.ui.Button(label="Layout", style=discord.ButtonStyle.secondary, disabled=True),
                 ),
+                discord.ui.Separator(),
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Role Stack"),
                     discord.ui.TextDisplay(format_backup_role_preview(summary)),
