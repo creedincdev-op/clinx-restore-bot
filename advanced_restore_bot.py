@@ -22,7 +22,9 @@ TOKEN = os.getenv("BOT_TOKEN")
 DEFAULT_BACKUP_GUILD_ID = os.getenv("DEFAULT_BACKUP_GUILD_ID")
 SUPPORT_URL = "https://discord.gg/V6YEw2Wxcb"
 DEVELOPER_USER_IDS = {1240237445841420302}
-FREE_BACKUP_LIMIT = 7
+FREE_BACKUP_LIMIT = 5
+PREMIUM_TERM_DAYS = 30
+PREMIUM_GRACE_DAYS = 30
 INTERVAL_PRESET_HOURS: tuple[int, ...] = (4, 8, 12, 24, 48, 72, 168, 336, 720)
 INTERVAL_PRESET_CHOICES = [
     app_commands.Choice(name="4 hours", value=4),
@@ -37,9 +39,9 @@ INTERVAL_PRESET_CHOICES = [
 ]
 PLAN_BACKUP_LIMITS = {
     "free": FREE_BACKUP_LIMIT,
-    "pro": 50,
-    "pro_plus": 100,
-    "pro_ultra": 250,
+    "pro": 10,
+    "pro_plus": 25,
+    "pro_ultra": 40,
 }
 PREMIUM_PLAN_CATALOG: dict[str, dict[str, Any]] = {
     "pro": {
@@ -49,7 +51,7 @@ PREMIUM_PLAN_CATALOG: dict[str, dict[str, Any]] = {
         "features": (
             "Backup channels, roles, settings",
             "Backup threads and forum posts",
-            "Up to 50 backups",
+            "Up to 10 backups",
             "2 auto backups/day",
         ),
     },
@@ -59,7 +61,7 @@ PREMIUM_PLAN_CATALOG: dict[str, dict[str, Any]] = {
         "badge_label": "Pro Plus",
         "features": (
             "Everything in Pro",
-            "Up to 100 backups",
+            "Up to 25 backups",
             "4 auto backups/day",
             "Priority restore queue",
         ),
@@ -70,7 +72,7 @@ PREMIUM_PLAN_CATALOG: dict[str, dict[str, Any]] = {
         "badge_label": "MAX",
         "features": (
             "Everything in Pro Plus",
-            "Up to 250 backups",
+            "Up to 40 backups",
             "8 auto backups/day",
             "Advanced sync matrix",
         ),
@@ -540,7 +542,12 @@ def get_guild_safety_bucket(store: dict[str, Any], guild_id: int) -> dict[str, A
             entitlement["gifted_by_user_id"] = str(entitlement["gifted_by_user_id"])
         if entitlement.get("cancelled_by_user_id") is not None:
             entitlement["cancelled_by_user_id"] = str(entitlement["cancelled_by_user_id"])
-        entitlement["active"] = bool(entitlement.get("active", True))
+        entitlement["billing_cycle"] = str(entitlement.get("billing_cycle") or "monthly")
+        entitlement["term_days"] = int(entitlement.get("term_days") or (365 if entitlement["billing_cycle"] == "yearly" else PREMIUM_TERM_DAYS))
+        entitlement["expires_at"] = entitlement.get("expires_at") or compute_premium_expiry(entitlement.get("gifted_at"), term_days=entitlement["term_days"])
+        end_anchor = entitlement.get("cancelled_at") or entitlement["expires_at"]
+        entitlement["grace_ends_at"] = entitlement.get("grace_ends_at") or compute_premium_grace_end(end_anchor)
+        entitlement["active"] = bool(entitlement.get("active", True)) and entitlement.get("cancelled_at") is None
         entitlement["gifted_to_display_name"] = str(
             entitlement.get("gifted_to_display_name") or f"User {entitlement.get('gifted_to_user_id', 'unknown')}"
         )
@@ -574,6 +581,146 @@ def parse_iso_timestamp(value: str | None) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def compute_premium_expiry(gifted_at: str | None, *, term_days: int) -> str:
+    start = parse_iso_timestamp(gifted_at) or datetime.now(timezone.utc)
+    return (start + timedelta(days=term_days)).isoformat()
+
+
+def compute_premium_grace_end(end_at: str | None) -> str:
+    end_dt = parse_iso_timestamp(end_at) or datetime.now(timezone.utc)
+    return (end_dt + timedelta(days=PREMIUM_GRACE_DAYS)).isoformat()
+
+
+def enrich_premium_entitlement(entitlement: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(entitlement, dict):
+        return None
+
+    plan_key = str(entitlement.get("plan_key") or "free")
+    plan = PREMIUM_PLAN_CATALOG.get(plan_key)
+    billing_cycle = str(entitlement.get("billing_cycle") or "monthly")
+    term_days = int(entitlement.get("term_days") or (365 if billing_cycle == "yearly" else PREMIUM_TERM_DAYS))
+    gifted_at = entitlement.get("gifted_at") or utc_now_iso()
+    expires_at = entitlement.get("expires_at") or compute_premium_expiry(gifted_at, term_days=term_days)
+    cancelled_at = entitlement.get("cancelled_at")
+    active_flag = bool(entitlement.get("active", True)) and cancelled_at is None
+    ended_at = cancelled_at or expires_at
+    grace_ends_at = entitlement.get("grace_ends_at") or compute_premium_grace_end(ended_at)
+    now = datetime.now(timezone.utc)
+    expires_dt = parse_iso_timestamp(expires_at)
+    grace_dt = parse_iso_timestamp(grace_ends_at)
+
+    if active_flag and expires_dt and now < expires_dt:
+        state = "active"
+    elif grace_dt and now < grace_dt:
+        state = "grace"
+    else:
+        state = "expired"
+
+    return {
+        **entitlement,
+        "plan_key": plan_key,
+        "plan_name": str(entitlement.get("plan_name") or (plan["display_name"] if plan else "Unknown Plan")),
+        "billing_cycle": billing_cycle,
+        "term_days": term_days,
+        "gifted_at": gifted_at,
+        "expires_at": expires_at,
+        "grace_ends_at": grace_ends_at,
+        "state": state,
+        "active": state == "active",
+        "limit": PLAN_BACKUP_LIMITS.get(plan_key, PLAN_BACKUP_LIMITS["free"]),
+    }
+
+
+def get_backup_vault_policy_for_guild(guild_id: int) -> dict[str, Any]:
+    entitlement = enrich_premium_entitlement(get_guild_premium_entitlement(guild_id))
+    policy: dict[str, Any] = {
+        "state": "free",
+        "creation_limit": PLAN_BACKUP_LIMITS["free"],
+        "plan_limit": PLAN_BACKUP_LIMITS["free"],
+        "plan_label": "Free",
+        "badge_label": "Free",
+        "billing_cycle": None,
+        "expires_at": None,
+        "grace_ends_at": None,
+        "status_text": f"Free vault • up to `{PLAN_BACKUP_LIMITS['free']}` backups",
+    }
+    if entitlement is None:
+        return policy
+
+    plan_label = str(entitlement.get("plan_name") or "Premium")
+    state = str(entitlement.get("state") or "free")
+    plan_limit = int(entitlement.get("limit") or PLAN_BACKUP_LIMITS["free"])
+    creation_limit = plan_limit if state == "active" else PLAN_BACKUP_LIMITS["free"]
+    badge_label = (
+        plan_label if state == "active" else
+        f"{plan_label} Grace" if state == "grace" else
+        f"{plan_label} Expired"
+    )
+    status_text = (
+        f"{plan_label} monthly active • Renews: `{format_backup_timestamp(entitlement.get('expires_at'))}`"
+        if state == "active" else
+        f"{plan_label} ended • Grace until `{format_backup_timestamp(entitlement.get('grace_ends_at'))}`"
+        if state == "grace" else
+        f"{plan_label} expired • Extra backups above free cap are now at risk"
+    )
+    return {
+        "state": state,
+        "creation_limit": creation_limit,
+        "plan_limit": plan_limit,
+        "plan_label": plan_label,
+        "badge_label": badge_label,
+        "billing_cycle": entitlement.get("billing_cycle"),
+        "expires_at": entitlement.get("expires_at"),
+        "grace_ends_at": entitlement.get("grace_ends_at"),
+        "status_text": status_text,
+        "entitlement": entitlement,
+    }
+
+
+def compute_at_risk_backup_ids(entries: list[dict[str, Any]], vault_policy: dict[str, Any]) -> set[str]:
+    if vault_policy.get("state") != "expired":
+        return set()
+    limit = PLAN_BACKUP_LIMITS["free"]
+    overflow = max(0, len(entries) - limit)
+    if overflow <= 0:
+        return set()
+    oldest_entries = sorted(entries, key=lambda entry: entry.get("created_at", ""))[:overflow]
+    return {str(entry.get("id")) for entry in oldest_entries if entry.get("id")}
+
+
+def format_vault_storage_state(vault_policy: dict[str, Any], *, at_risk_count: int) -> str:
+    state = str(vault_policy.get("state") or "free")
+    if state == "active":
+        return str(vault_policy.get("status_text") or "Vault active.")
+    if state == "grace":
+        return (
+            str(vault_policy.get("status_text") or "Premium grace window active.")
+            + "\nExtra backups are safe for now, but new backup creation is limited to the free cap until renewal."
+        )
+    if at_risk_count > 0:
+        return (
+            str(vault_policy.get("status_text") or "Premium expired.")
+            + f"\n`{at_risk_count}` backup(s) are now at risk until the vault drops back to the free cap."
+        )
+    return str(vault_policy.get("status_text") or "Vault is running on the free cap.")
+
+
+def format_backup_retention_label(
+    backup_id: str | None,
+    vault_policy: dict[str, Any],
+    *,
+    at_risk_ids: set[str],
+) -> str:
+    state = str(vault_policy.get("state") or "free")
+    if state in {"free", "active"}:
+        return "Stored Until: `Until deleted`"
+    if state == "grace":
+        return f"Stored Until: `Grace until {format_backup_timestamp(vault_policy.get('grace_ends_at'))}`"
+    if backup_id and backup_id in at_risk_ids:
+        return "Stored Until: `At risk now - renew premium or trim the vault to the free cap`"
+    return "Stored Until: `Retained inside the free cap`"
 
 
 def format_relative_timestamp(value: str | None) -> str:
@@ -1092,7 +1239,7 @@ def get_guild_premium_entitlement(guild_id: int) -> dict[str, Any] | None:
     store = load_safety_store()
     bucket = get_guild_safety_bucket(store, guild_id)
     entitlement = bucket.get("premium_entitlement")
-    return entitlement if isinstance(entitlement, dict) else None
+    return enrich_premium_entitlement(entitlement if isinstance(entitlement, dict) else None)
 
 
 def set_guild_premium_entitlement(
@@ -1107,6 +1254,10 @@ def set_guild_premium_entitlement(
     store = load_safety_store()
     bucket = get_guild_safety_bucket(store, guild.id)
     plan = PREMIUM_PLAN_CATALOG[plan_key]
+    gifted_at = utc_now_iso()
+    billing_cycle = "monthly"
+    term_days = PREMIUM_TERM_DAYS
+    expires_at = compute_premium_expiry(gifted_at, term_days=term_days)
     entitlement = {
         "plan_key": plan_key,
         "plan_name": plan["display_name"],
@@ -1114,7 +1265,11 @@ def set_guild_premium_entitlement(
         "gifted_to_display_name": gifted_to_display_name or f"User {gifted_to_user_id}",
         "gifted_by_user_id": str(gifted_by_user_id),
         "gifted_by_display_name": gifted_by_display_name or "Unknown Operator",
-        "gifted_at": utc_now_iso(),
+        "gifted_at": gifted_at,
+        "billing_cycle": billing_cycle,
+        "term_days": term_days,
+        "expires_at": expires_at,
+        "grace_ends_at": compute_premium_grace_end(expires_at),
         "guild_name": guild.name,
         "active": True,
         "cancelled_at": None,
@@ -1123,7 +1278,7 @@ def set_guild_premium_entitlement(
     }
     bucket["premium_entitlement"] = entitlement
     save_safety_store(store)
-    return entitlement
+    return enrich_premium_entitlement(entitlement) or entitlement
 
 
 def cancel_guild_premium_entitlement(
@@ -1140,11 +1295,12 @@ def cancel_guild_premium_entitlement(
     entitlement = dict(entitlement)
     entitlement["active"] = False
     entitlement["cancelled_at"] = utc_now_iso()
+    entitlement["grace_ends_at"] = compute_premium_grace_end(entitlement["cancelled_at"])
     entitlement["cancelled_by_user_id"] = str(cancelled_by_user_id)
     entitlement["cancelled_by_display_name"] = cancelled_by_display_name
     bucket["premium_entitlement"] = entitlement
     save_safety_store(store)
-    return entitlement
+    return enrich_premium_entitlement(entitlement)
 
 
 def get_backup_interval_config(guild_id: int) -> dict[str, Any] | None:
@@ -1221,14 +1377,8 @@ def update_backup_interval_runtime(guild_id: int, **updates: Any) -> dict[str, A
 
 
 def get_backup_limit_for_guild(guild_id: int) -> tuple[int, str]:
-    entitlement = get_guild_premium_entitlement(guild_id)
-    if not entitlement or not entitlement.get("active"):
-        return PLAN_BACKUP_LIMITS["free"], "Free"
-    plan_key = str(entitlement.get("plan_key", "free"))
-    plan = PREMIUM_PLAN_CATALOG.get(plan_key)
-    if plan is None:
-        return PLAN_BACKUP_LIMITS["free"], "Free"
-    return PLAN_BACKUP_LIMITS.get(plan_key, PLAN_BACKUP_LIMITS["free"]), plan["display_name"]
+    policy = get_backup_vault_policy_for_guild(guild_id)
+    return int(policy["creation_limit"]), str(policy["badge_label"])
 
 
 def normalize_premium_plan(raw_plan: str | None) -> str | None:
@@ -1298,7 +1448,7 @@ def build_developer_dashboard_entries(
                 )
             continue
 
-        entitlement = bucket.get("premium_entitlement")
+        entitlement = enrich_premium_entitlement(bucket.get("premium_entitlement") if isinstance(bucket.get("premium_entitlement"), dict) else None)
         if not isinstance(entitlement, dict):
             continue
         if str(entitlement.get("gifted_by_user_id") or "") != str(developer_id):
@@ -1317,6 +1467,10 @@ def build_developer_dashboard_entries(
                 "gifted_by_display_name": str(entitlement.get("gifted_by_display_name") or "Unknown Operator"),
                 "gifted_at": entitlement.get("gifted_at"),
                 "active": bool(entitlement.get("active", True)),
+                "state": str(entitlement.get("state") or "expired"),
+                "billing_cycle": str(entitlement.get("billing_cycle") or "monthly"),
+                "expires_at": entitlement.get("expires_at"),
+                "grace_ends_at": entitlement.get("grace_ends_at"),
                 "cancelled_at": entitlement.get("cancelled_at"),
                 "cancelled_by_user_id": str(entitlement.get("cancelled_by_user_id") or ""),
                 "cancelled_by_display_name": str(entitlement.get("cancelled_by_display_name") or ""),
@@ -2793,6 +2947,7 @@ class BackupVaultSelect(discord.ui.Select["BackupListCardView"]):
             self.view.bot_user,
             author_id=self.view.author_id,
             entries=self.view.entries,
+            guild_id=self.view.guild_id,
             backup_limit=self.view.backup_limit,
             plan_label=self.view.plan_label,
             page=self.view.page,
@@ -2816,6 +2971,7 @@ class BackupVaultPageButton(discord.ui.Button["BackupListCardView"]):
             self.view.bot_user,
             author_id=self.view.author_id,
             entries=self.view.entries,
+            guild_id=self.view.guild_id,
             backup_limit=self.view.backup_limit,
             plan_label=self.view.plan_label,
             page=next_page,
@@ -2844,6 +3000,7 @@ class BackupVaultLoadButton(discord.ui.Button["BackupListCardView"]):
                 self.view.bot_user,
                 author_id=self.view.author_id,
                 entries=entries,
+                guild_id=self.view.guild_id,
                 backup_limit=self.view.backup_limit,
                 plan_label=self.view.plan_label,
                 page=min(self.view.page, max(0, (len(entries) - 1) // BACKUP_VAULT_PAGE_SIZE) if entries else 0),
@@ -2890,6 +3047,7 @@ class BackupVaultDeleteButton(discord.ui.Button["BackupListCardView"]):
             self.view.bot_user,
             author_id=self.view.author_id,
             entries=entries,
+            guild_id=self.view.guild_id,
             backup_limit=self.view.backup_limit,
             plan_label=self.view.plan_label,
             page=min(self.view.page, max(0, (len(entries) - 1) // BACKUP_VAULT_PAGE_SIZE) if entries else 0),
@@ -2909,6 +3067,7 @@ class BackupListCardView(discord.ui.LayoutView):
         *,
         author_id: int,
         entries: list[dict[str, Any]],
+        guild_id: int | None,
         backup_limit: int,
         plan_label: str,
         page: int = 0,
@@ -2918,8 +3077,23 @@ class BackupListCardView(discord.ui.LayoutView):
         self.bot_user = bot_user
         self.author_id = author_id
         self.entries = entries
-        self.backup_limit = backup_limit
-        self.plan_label = plan_label
+        self.guild_id = guild_id
+        self.vault_policy = (
+            get_backup_vault_policy_for_guild(guild_id)
+            if guild_id is not None
+            else {
+                "state": "free",
+                "creation_limit": backup_limit,
+                "plan_limit": backup_limit,
+                "plan_label": plan_label,
+                "badge_label": plan_label,
+                "status_text": f"Free vault • up to `{backup_limit}` backups",
+            }
+        )
+        self.backup_limit = int(self.vault_policy.get("creation_limit") or backup_limit)
+        self.plan_limit = int(self.vault_policy.get("plan_limit") or self.backup_limit)
+        self.plan_label = str(self.vault_policy.get("badge_label") or plan_label)
+        self.at_risk_ids = compute_at_risk_backup_ids(entries, self.vault_policy)
         self.page = page
         self.selected_backup_id = selected_backup_id
         self.rebuild()
@@ -2963,6 +3137,7 @@ class BackupListCardView(discord.ui.LayoutView):
             style=discord.ButtonStyle.secondary,
             disabled=True,
         )
+        vault_feed_text = format_vault_storage_state(self.vault_policy, at_risk_count=len(self.at_risk_ids))
 
         if not self.entries:
             container = discord.ui.Container(
@@ -2974,7 +3149,10 @@ class BackupListCardView(discord.ui.LayoutView):
                 discord.ui.Separator(),
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Vault State"),
-                    discord.ui.TextDisplay(f"`0/{self.backup_limit}` slots used"),
+                    discord.ui.TextDisplay(
+                        f"`0/{self.backup_limit}` slots used\n"
+                        f"{vault_feed_text}"
+                    ),
                     accessory=vault_badge,
                 ),
                 discord.ui.TextDisplay(
@@ -3011,7 +3189,8 @@ class BackupListCardView(discord.ui.LayoutView):
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Vault Feed"),
                     discord.ui.TextDisplay(
-                        f"`{len(page_entries)}` backup ID ready for restore"
+                        f"`{len(self.entries)}/{self.backup_limit}` private backups stored\n"
+                        f"{vault_feed_text}"
                     ),
                     accessory=discord.ui.Button(label="Private", style=discord.ButtonStyle.secondary, disabled=True),
                 ),
@@ -3033,7 +3212,7 @@ class BackupListCardView(discord.ui.LayoutView):
                 f"Categories: `{(summary or {}).get('categories_count', 0)}`\n"
                 f"Channels: `{(summary or {}).get('channels_count', 0)}`\n"
                 f"Roles: `{(summary or {}).get('roles_count', 0)}`\n"
-                "Stored Until: `Until deleted`"
+                f"{format_backup_retention_label(selected_entry.get('id'), self.vault_policy, at_risk_ids=self.at_risk_ids)}"
             )
             container = discord.ui.Container(
                 discord.ui.Section(
@@ -3046,7 +3225,8 @@ class BackupListCardView(discord.ui.LayoutView):
                     discord.ui.TextDisplay("### Vault Feed"),
                     discord.ui.TextDisplay(
                         f"`{len(self.entries)}/{self.backup_limit}` private backups stored\n"
-                        f"Current page: `{self.page + 1}` / `{self.max_page_index + 1}`"
+                        f"Current page: `{self.page + 1}` / `{self.max_page_index + 1}`\n"
+                        f"{vault_feed_text}"
                     ),
                     accessory=count_badge,
                 ),
@@ -3277,6 +3457,7 @@ class PremiumGiftCardView(discord.ui.LayoutView):
         plan = PREMIUM_PLAN_CATALOG[self.entitlement["plan_key"]]
         feature_lines = "\n".join(f"- ✦ {feature}" for feature in plan["features"])
         gifted_at = format_backup_timestamp(self.entitlement.get("gifted_at"))
+        expires_at = format_backup_timestamp(self.entitlement.get("expires_at"))
         subtitle = (
             f"🎁 {self.gifted_member.mention} just unlocked **{plan['display_name']}** in **{self.guild.name}**."
         )
@@ -3294,6 +3475,7 @@ class PremiumGiftCardView(discord.ui.LayoutView):
             "### 🔐 Activation Status\n"
             f"- 👑 Gifted by: <@{self.gifted_by_id}>\n"
             f"- 🕒 Activated: `{gifted_at}`\n"
+            f"- 🗓 Billing: `Monthly` · Renews: `{expires_at}`\n"
             "- 🌐 Guild premium is now active for CLINX-permitted members in this server.\n"
             "- 🛡 Safety gates and owner approval rules still apply where required."
         )
@@ -3501,11 +3683,19 @@ class DeveloperDashboardView(discord.ui.LayoutView):
                     f"Granted: `{format_backup_timestamp(entry.get('granted_at'))}`"
                 )
                 continue
-            status = "Active" if entry.get("active") else "Cancelled"
+            state = str(entry.get("state") or ("active" if entry.get("active") else "expired")).title()
+            state_line = (
+                f"Renews: `{format_backup_timestamp(entry.get('expires_at'))}`"
+                if state == "Active" else
+                f"Grace until: `{format_backup_timestamp(entry.get('grace_ends_at'))}`"
+                if state == "Grace" else
+                f"Expired: `{format_backup_timestamp(entry.get('grace_ends_at'))}`"
+            )
             lines.append(
                 f"**{index}.** `{entry['plan_name']}` -> {format_actor_label(entry['gifted_to_display_name'], entry['gifted_to_user_id'])}\n"
                 f"Guild: `{entry['guild_name']}`\n"
-                f"State: `{status}` · Gifted: `{format_backup_timestamp(entry.get('gifted_at'))}`"
+                f"State: `{state}` · Gifted: `{format_backup_timestamp(entry.get('gifted_at'))}`\n"
+                f"{state_line}"
             )
         return "\n".join(lines)
 
@@ -3530,13 +3720,21 @@ class DeveloperDashboardView(discord.ui.LayoutView):
                 discord.ButtonStyle.primary,
             )
 
-        status_label = "Active" if entry.get("active") else "Cancelled"
+        state = str(entry.get("state") or ("active" if entry.get("active") else "expired"))
+        status_label = state.title()
         cancelled_line = ""
         if entry.get("cancelled_at"):
             cancelled_line = (
                 f"\nCancelled: `{format_backup_timestamp(entry.get('cancelled_at'))}`"
                 f"\nCancelled By: {format_actor_label(entry.get('cancelled_by_display_name'), entry.get('cancelled_by_user_id'))}"
             )
+        state_line = (
+            f"\nRenews: `{format_backup_timestamp(entry.get('expires_at'))}`"
+            if state == "active" else
+            f"\nGrace Until: `{format_backup_timestamp(entry.get('grace_ends_at'))}`"
+            if state == "grace" else
+            f"\nGrace Ended: `{format_backup_timestamp(entry.get('grace_ends_at'))}`"
+        )
         return (
             status_label,
             (
@@ -3544,9 +3742,10 @@ class DeveloperDashboardView(discord.ui.LayoutView):
                 f"Guild: `{entry['guild_name']}`\n"
                 f"Plan: `{entry['plan_name']}`\n"
                 f"Gifted: `{format_backup_timestamp(entry.get('gifted_at'))}`"
+                f"{state_line}"
                 f"{cancelled_line}"
             ),
-            discord.ButtonStyle.success if entry.get("active") else discord.ButtonStyle.secondary,
+            discord.ButtonStyle.success if state == "active" else discord.ButtonStyle.primary if state == "grace" else discord.ButtonStyle.secondary,
         )
 
     def rebuild(self) -> None:
@@ -5007,7 +5206,9 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
 
     if not is_developer_user(interaction.user):
         existing_entries = await list_user_backup_entries_async(interaction.user.id)
-        backup_limit, plan_label = get_backup_limit_for_guild(source.id)
+        vault_policy = get_backup_vault_policy_for_guild(source.id)
+        backup_limit = int(vault_policy.get("creation_limit") or FREE_BACKUP_LIMIT)
+        plan_label = str(vault_policy.get("badge_label") or "Free")
         if len(existing_entries) >= backup_limit:
             await interaction.followup.send(
                 embed=make_embed(
@@ -5015,7 +5216,8 @@ async def backup_create(interaction: discord.Interaction, source_guild_id: int |
                     (
                         f"You already use `{len(existing_entries)}/{backup_limit}` backup slots.\n"
                         f"Vault tier: `{plan_label}`\n"
-                        "Delete an older backup or activate a higher premium tier before creating another snapshot."
+                        f"{vault_policy.get('status_text')}\n"
+                        "Delete older backups, renew premium, or move back under the free cap before creating another snapshot."
                     ),
                     EMBED_WARN,
                     interaction,
@@ -5103,9 +5305,6 @@ async def backup_list(interaction: discord.Interaction) -> None:
         await send_access_denied(interaction, message or "You cannot inspect backup ownership in this server.")
         return
     entries = await list_user_backup_entries_async(interaction.user.id)
-    if not entries:
-        await interaction.response.send_message(embed=make_embed("Backups", "No backups found.", EMBED_INFO), ephemeral=True)
-        return
 
     guild = interaction.guild
     backup_limit = FREE_BACKUP_LIMIT
@@ -5117,6 +5316,7 @@ async def backup_list(interaction: discord.Interaction) -> None:
             interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
             author_id=interaction.user.id,
             entries=entries,
+            guild_id=guild.id if guild else None,
             backup_limit=backup_limit,
             plan_label=plan_label,
         ),
