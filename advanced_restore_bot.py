@@ -5918,6 +5918,26 @@ async def send_temp_prefix_notice(
         return
 
 
+async def send_temp_prefix_notice_nowait(
+    ctx: commands.Context,
+    title: str,
+    description: str,
+    color: int,
+    *,
+    delay_seconds: float = 3.0,
+) -> None:
+    message = await ctx.send(embed=make_embed(title, description, color))
+
+    async def _delete_later() -> None:
+        await asyncio.sleep(delay_seconds)
+        try:
+            await message.delete()
+        except (discord.Forbidden, discord.HTTPException):
+            return
+
+    asyncio.create_task(_delete_later(), name="clinx-temp-prefix-notice-delete")
+
+
 @bot.command(name="grant", hidden=True)
 async def dev_grant(ctx: commands.Context, member: discord.Member, mode: str | None = None) -> None:
     if not is_developer_user(ctx.author):
@@ -6178,45 +6198,23 @@ async def dev_purge(ctx: commands.Context, amount: int | None = None) -> None:
         return
 
     purge_count = max(1, min(int(amount or 1), 200))
-    status_message = await ctx.send(
-        embed=make_embed(
-            "Purge Started",
-            f"Deleting up to `{purge_count}` recent message(s) in {ctx.channel.mention}.",
-            EMBED_INFO,
-        )
-    )
     try:
         deleted_messages = await ctx.channel.purge(
-            limit=purge_count + 2,
+            limit=purge_count + 1,
             bulk=True,
-            check=lambda message: message.id != status_message.id,
             reason=f"CLINX developer purge by {ctx.author} ({ctx.author.id})",
         )
     except (discord.Forbidden, discord.HTTPException):
-        try:
-            await status_message.edit(
-                embed=make_embed("Purge Failed", "CLINX could not purge messages in this channel.", EMBED_ERR)
-            )
-        except (discord.Forbidden, discord.HTTPException):
-            await send_temp_prefix_notice(ctx, "Purge Failed", "CLINX could not purge messages in this channel.", EMBED_ERR)
+        await send_temp_prefix_notice(ctx, "Purge Failed", "CLINX could not purge messages in this channel.", EMBED_ERR)
         return
 
-    deleted_count = len(deleted_messages)
-    if any(message.id == ctx.message.id for message in deleted_messages):
-        deleted_count = max(0, deleted_count - 1)
-
-    try:
-        await status_message.edit(
-            embed=make_embed(
-                "Purge Complete",
-                f"Deleted `{deleted_count}` recent message(s) in {ctx.channel.mention}.",
-                EMBED_OK,
-            )
-        )
-        await asyncio.sleep(3.0)
-        await status_message.delete()
-    except (discord.Forbidden, discord.HTTPException):
-        return
+    deleted_count = max(0, len(deleted_messages) - 1)
+    await send_temp_prefix_notice_nowait(
+        ctx,
+        "Purge Complete",
+        f"Deleted `{deleted_count}` recent message(s) in {ctx.channel.mention}.",
+        EMBED_OK,
+    )
 
 
 @bot.command(name="gift", hidden=True)
