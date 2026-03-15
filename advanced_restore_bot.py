@@ -3467,14 +3467,15 @@ class PremiumGiftCardView(discord.ui.LayoutView):
             else discord.ui.Button(label="CLINX", disabled=True)
         )
         plan = PREMIUM_PLAN_CATALOG[self.entitlement["plan_key"]]
+        server_name = self.guild.name.strip() if getattr(self.guild, "name", "") else "this server"
         feature_lines = "\n".join(f"- {feature}" for feature in plan["features"])
         gifted_at = format_backup_timestamp(self.entitlement.get("gifted_at"))
         expires_at = format_backup_timestamp(self.entitlement.get("expires_at"))
         subtitle = (
-            f"{self.gifted_member.mention} now has **{plan['display_name']}** active in **{self.guild.name}**."
+            f"{self.gifted_member.mention} now has **{plan['display_name']}** active in **{server_name}**."
         )
         premium_strip = (
-            f"Plan: **{plan['display_name']}**  •  Scope: **{self.guild.name}**\n"
+            f"Plan: **{plan['display_name']}**  •  Server: **{server_name}**\n"
             f"Billing: **Monthly**  •  Renews: **{expires_at}**"
         )
         payload_text = (
@@ -3486,14 +3487,17 @@ class PremiumGiftCardView(discord.ui.LayoutView):
         activation_text = (
             "### Activation Status\n"
             f"- Gifted by: <@{self.gifted_by_id}>\n"
-            f"- Activated: **{gifted_at}**\n"
-            "- Guild premium is now active for CLINX-permitted members in this server.\n"
+            f"- Activated: **{gifted_at}**"
+        )
+        access_text = (
+            "### Server Access\n"
+            f"- Premium is now active for CLINX-permitted members in **{server_name}**.\n"
             "- Safety gates and owner approval rules still apply where required."
         )
         self.add_item(
             discord.ui.Container(
                 discord.ui.Section(
-                    discord.ui.TextDisplay("## Premium Gift Delivered"),
+                    discord.ui.TextDisplay("## 🎁 Premium Gift Delivered"),
                     discord.ui.TextDisplay(subtitle),
                     discord.ui.TextDisplay(premium_strip),
                     accessory=hero,
@@ -3510,6 +3514,7 @@ class PremiumGiftCardView(discord.ui.LayoutView):
                 ),
                 discord.ui.TextDisplay(f"### Included\n{feature_lines}"),
                 discord.ui.TextDisplay(activation_text),
+                discord.ui.TextDisplay(access_text),
                 accent_color=0x4F8CFF,
             )
         )
