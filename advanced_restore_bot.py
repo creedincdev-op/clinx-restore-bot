@@ -3280,14 +3280,18 @@ class PremiumGiftCardView(discord.ui.LayoutView):
         subtitle = (
             f"🎁 {self.gifted_member.mention} just unlocked **{plan['display_name']}** in **{self.guild.name}**."
         )
+        premium_strip = (
+            f"✨ Premium lane engaged • 💠 {plan['badge_label']} badge armed\n"
+            "🚀 Backup caps lifted • 🧩 Advanced server tooling unlocked"
+        )
         payload_text = (
             f"🎯 Recipient: {self.gifted_member.mention}\n"
-            f"📦 Plan: `{plan['display_name']}`\n"
+            f"📦 Plan Lane: `{plan['display_name']}`\n"
             f"💳 Value: `{plan['price_label']}`\n"
             f"🏰 Scope: `{self.guild.name}`"
         )
         activation_text = (
-            "### Activation Status\n"
+            "### 🔐 Activation Status\n"
             f"- 👑 Gifted by: <@{self.gifted_by_id}>\n"
             f"- 🕒 Activated: `{gifted_at}`\n"
             "- 🌐 Guild premium is now active for CLINX-permitted members in this server.\n"
@@ -3298,6 +3302,7 @@ class PremiumGiftCardView(discord.ui.LayoutView):
                 discord.ui.Section(
                     discord.ui.TextDisplay("## ✦ Premium Gift Delivered"),
                     discord.ui.TextDisplay(subtitle),
+                    discord.ui.TextDisplay(premium_strip),
                     accessory=hero,
                 ),
                 discord.ui.Separator(),
