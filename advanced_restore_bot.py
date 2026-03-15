@@ -43,6 +43,7 @@ PLAN_BACKUP_LIMITS = {
     "pro_plus": 25,
     "pro_ultra": 40,
 }
+DEVELOPER_BACKUP_LIMIT = 10**9
 PREMIUM_PLAN_CATALOG: dict[str, dict[str, Any]] = {
     "pro": {
         "display_name": "Pro",
@@ -1385,6 +1386,12 @@ def update_backup_interval_runtime(guild_id: int, **updates: Any) -> dict[str, A
 def get_backup_limit_for_guild(guild_id: int) -> tuple[int, str]:
     policy = get_backup_vault_policy_for_guild(guild_id)
     return int(policy["creation_limit"]), str(policy["badge_label"])
+
+
+def get_backup_limit_for_actor(guild_id: int, user_id: int | None = None) -> tuple[int, str]:
+    if user_id in DEVELOPER_USER_IDS:
+        return DEVELOPER_BACKUP_LIMIT, "Developer"
+    return get_backup_limit_for_guild(guild_id)
 
 
 def normalize_premium_plan(raw_plan: str | None) -> str | None:
@@ -2804,14 +2811,14 @@ def build_backup_interval_health_text(config: dict[str, Any] | None) -> str:
     if not config.get("enabled"):
         return "- Auto backup lane is disabled.\n- Existing settings are preserved until you turn it on again."
     lines = [
-        f"- Interval: `{format_interval_label(int(config.get('interval_hours') or 0))}`",
-        f"- Keep latest: `{int(config.get('keep_count') or 1)}` backup(s)",
-        f"- Next seal: `{format_relative_timestamp(config.get('next_run_at'))}`",
+        f"- Interval: **{format_interval_label(int(config.get('interval_hours') or 0))}**",
+        f"- Keep latest: **{int(config.get('keep_count') or 1)}** backup(s)",
+        f"- Next seal: **{format_relative_timestamp(config.get('next_run_at'))}**",
     ]
     if config.get("last_success_at"):
-        lines.append(f"- Last success: `{format_relative_timestamp(config.get('last_success_at'))}`")
+        lines.append(f"- Last success: **{format_relative_timestamp(config.get('last_success_at'))}**")
     if config.get("last_error"):
-        lines.append(f"- Last issue: `{str(config['last_error'])[:120]}`")
+        lines.append(f"- Last issue: **{str(config['last_error'])[:120]}**")
     return "\n".join(lines)
 
 
@@ -2827,6 +2834,7 @@ class BackupIntervalCardView(discord.ui.LayoutView):
         backup_count: int,
         backup_limit: int,
         plan_label: str,
+        viewer_id: int | None = None,
         color: int = EMBED_INFO,
     ) -> None:
         super().__init__(timeout=None)
@@ -2838,6 +2846,7 @@ class BackupIntervalCardView(discord.ui.LayoutView):
         self.backup_count = backup_count
         self.backup_limit = backup_limit
         self.plan_label = plan_label
+        self.viewer_id = viewer_id
         self.color = color
         self.rebuild()
 
@@ -2848,6 +2857,8 @@ class BackupIntervalCardView(discord.ui.LayoutView):
             if self.bot_user
             else discord.ui.Button(label="CLINX", disabled=True)
         )
+        is_developer_viewer = self.viewer_id in DEVELOPER_USER_IDS if self.viewer_id is not None else False
+        slot_cap_label = "∞" if is_developer_viewer else str(self.backup_limit)
         enabled = bool(self.config and self.config.get("enabled"))
         state_badge = discord.ui.Button(
             label="Enabled" if enabled else "Disabled",
@@ -2862,17 +2873,22 @@ class BackupIntervalCardView(discord.ui.LayoutView):
         owner_name = "Not assigned"
         if isinstance(self.config, dict) and self.config.get("owner_display_name"):
             owner_name = str(self.config["owner_display_name"])
+        header_strip = (
+            "🗂 Developer interval lane • ♾ Unlimited vault cap • ⚡ Auto-seal control"
+            if is_developer_viewer else
+            "🗂 Automatic seal lane • 🔐 Private vault route • ⚡ Interval control"
+        )
         runtime_text = (
-            f"Storage: `{get_backup_storage_label()}`\n"
-            f"Vault tier: `{self.plan_label}`\n"
-            f"Slots used: `{self.backup_count}/{self.backup_limit}`\n"
-            f"Vault owner: `{owner_name}`"
+            f"Storage: **{get_backup_storage_label()}**\n"
+            f"Vault tier: **{self.plan_label}**\n"
+            f"Slots used: **{self.backup_count}/{slot_cap_label}**\n"
+            f"Vault owner: **{owner_name}**"
         )
         schedule_text = build_backup_interval_health_text(self.config)
         last_backup_id = (self.config or {}).get("last_backup_id") if isinstance(self.config, dict) else None
         last_backup_text = (
-            f"`{last_backup_id}`\n"
-            f"`{format_backup_timestamp((self.config or {}).get('last_success_at'))}`"
+            f"**{last_backup_id}**\n"
+            f"**{format_backup_timestamp((self.config or {}).get('last_success_at'))}**"
             if last_backup_id
             else "No automatic backup sealed yet."
         )
@@ -2882,6 +2898,7 @@ class BackupIntervalCardView(discord.ui.LayoutView):
                 discord.ui.Section(
                     discord.ui.TextDisplay(f"## <> {self.title}"),
                     discord.ui.TextDisplay(self.subtitle),
+                    discord.ui.TextDisplay(header_strip),
                     accessory=hero,
                 ),
                 discord.ui.Separator(),
@@ -2890,16 +2907,19 @@ class BackupIntervalCardView(discord.ui.LayoutView):
                     discord.ui.TextDisplay(schedule_text),
                     accessory=interval_badge,
                 ),
+                discord.ui.Separator(),
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Runtime"),
                     discord.ui.TextDisplay(runtime_text),
                     accessory=state_badge,
                 ),
+                discord.ui.Separator(),
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Last Auto Backup"),
                     discord.ui.TextDisplay(last_backup_text),
                     accessory=discord.ui.Button(label="Vault", style=discord.ButtonStyle.primary, disabled=True),
                 ),
+                discord.ui.Separator(),
                 discord.ui.TextDisplay(
                     "### Commands\n"
                     "- Use **`/backup interval on`** to arm automatic backups.\n"
@@ -5163,7 +5183,7 @@ async def run_backup_interval_cycle(bot_instance: commands.Bot) -> None:
             continue
         owner_user_id = int(config.get("owner_user_id") or guild.owner_id)
         owner_display_name = str(config.get("owner_display_name") or guild.owner or f"Guild Owner {owner_user_id}")
-        backup_limit, _ = get_backup_limit_for_guild(guild.id)
+        backup_limit, _ = get_backup_limit_for_actor(guild.id, owner_user_id)
         keep_count = max(1, min(int(config.get("keep_count") or 1), backup_limit))
         can_rotate, _ = await trim_interval_backups_for_owner(
             owner_user_id,
@@ -5471,7 +5491,7 @@ async def backup_interval_on(
     if guild is None:
         await interaction.response.send_message(embed=make_embed("Error", "Run this in the server you want to schedule.", EMBED_ERR), ephemeral=True)
         return
-    backup_limit, plan_label = get_backup_limit_for_guild(guild.id)
+    backup_limit, plan_label = get_backup_limit_for_actor(guild.id, interaction.user.id)
     keep_count = min(int(keep), backup_limit)
     config = set_backup_interval_config(
         guild,
@@ -5495,6 +5515,7 @@ async def backup_interval_on(
             backup_count=len(entries),
             backup_limit=backup_limit,
             plan_label=plan_label,
+            viewer_id=interaction.user.id,
             color=EMBED_OK,
         ),
         ephemeral=True,
@@ -5515,7 +5536,7 @@ async def backup_interval_off(interaction: discord.Interaction) -> None:
     config = disable_backup_interval_config(guild)
     owner_user_id = int(config.get("owner_user_id") or interaction.user.id) if config else interaction.user.id
     entries = await list_user_backup_entries_async(owner_user_id)
-    backup_limit, plan_label = get_backup_limit_for_guild(guild.id)
+    backup_limit, plan_label = get_backup_limit_for_actor(guild.id, interaction.user.id)
     await interaction.response.send_message(
         view=BackupIntervalCardView(
             interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
@@ -5526,6 +5547,7 @@ async def backup_interval_off(interaction: discord.Interaction) -> None:
             backup_count=len(entries),
             backup_limit=backup_limit,
             plan_label=plan_label,
+            viewer_id=interaction.user.id,
             color=EMBED_WARN,
         ),
         ephemeral=True,
@@ -5546,7 +5568,7 @@ async def backup_interval_show(interaction: discord.Interaction) -> None:
     config = get_backup_interval_config(guild.id)
     owner_user_id = int(config.get("owner_user_id") or interaction.user.id) if isinstance(config, dict) else interaction.user.id
     entries = await list_user_backup_entries_async(owner_user_id)
-    backup_limit, plan_label = get_backup_limit_for_guild(guild.id)
+    backup_limit, plan_label = get_backup_limit_for_actor(guild.id, interaction.user.id)
     await interaction.response.send_message(
         view=BackupIntervalCardView(
             interaction.client.user if isinstance(interaction.client, commands.Bot) else None,
@@ -5557,6 +5579,7 @@ async def backup_interval_show(interaction: discord.Interaction) -> None:
             backup_count=len(entries),
             backup_limit=backup_limit,
             plan_label=plan_label,
+            viewer_id=interaction.user.id,
             color=EMBED_INFO,
         ),
         ephemeral=True,
