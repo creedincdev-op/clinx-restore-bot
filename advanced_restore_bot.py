@@ -1347,6 +1347,18 @@ async def send_developer_interaction_denied(interaction: discord.Interaction) ->
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+DEV_VISIBILITY_CHOICES = [
+    app_commands.Choice(name="Private", value="private"),
+    app_commands.Choice(name="Public", value="public"),
+]
+
+
+def resolve_dev_visibility(visibility: app_commands.Choice[str] | None, *, default_private: bool = True) -> bool:
+    if visibility is None:
+        return default_private
+    return visibility.value != "public"
+
+
 async def send_temp_interaction_notice_nowait(
     interaction: discord.Interaction,
     title: str,
@@ -5970,7 +5982,7 @@ async def leave(interaction: discord.Interaction) -> None:
     await guild.leave()
 
 
-async def handle_access_grant(interaction: discord.Interaction, user: discord.Member) -> None:
+async def handle_access_grant(interaction: discord.Interaction, user: discord.Member, *, ephemeral: bool = True) -> None:
     if not is_developer_user(interaction.user):
         await send_access_denied(interaction, "This developer access command is locked to the CLINX developer.")
         return
@@ -5990,11 +6002,11 @@ async def handle_access_grant(interaction: discord.Interaction, user: discord.Me
             badge_style=discord.ButtonStyle.success,
             accent_color=EMBED_OK,
         ),
-        ephemeral=True,
+        ephemeral=ephemeral,
     )
 
 
-async def handle_access_revoke(interaction: discord.Interaction, user: discord.Member) -> None:
+async def handle_access_revoke(interaction: discord.Interaction, user: discord.Member, *, ephemeral: bool = True) -> None:
     if not is_developer_user(interaction.user):
         await send_access_denied(interaction, "This developer access command is locked to the CLINX developer.")
         return
@@ -6014,34 +6026,48 @@ async def handle_access_revoke(interaction: discord.Interaction, user: discord.M
             badge_style=discord.ButtonStyle.secondary,
             accent_color=EMBED_WARN,
         ),
-        ephemeral=True,
+        ephemeral=ephemeral,
     )
 
 
 @dev_group.command(name="grant", description="Grant CLINX runtime bypass to a user in this server")
 @app_commands.allowed_installs(guilds=False, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
-async def dev_grant_slash(interaction: discord.Interaction, user: discord.Member) -> None:
-    await handle_access_grant(interaction, user)
+@app_commands.choices(visibility=DEV_VISIBILITY_CHOICES)
+async def dev_grant_slash(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    visibility: app_commands.Choice[str] | None = None,
+) -> None:
+    await handle_access_grant(interaction, user, ephemeral=resolve_dev_visibility(visibility))
 
 
 @dev_group.command(name="revoke", description="Revoke CLINX runtime bypass from a user in this server")
 @app_commands.allowed_installs(guilds=False, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
-async def dev_revoke_slash(interaction: discord.Interaction, user: discord.Member) -> None:
-    await handle_access_revoke(interaction, user)
+@app_commands.choices(visibility=DEV_VISIBILITY_CHOICES)
+async def dev_revoke_slash(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    visibility: app_commands.Choice[str] | None = None,
+) -> None:
+    await handle_access_revoke(interaction, user, ephemeral=resolve_dev_visibility(visibility))
 
 
 @dev_group.command(name="dashboard", description="Open the developer console")
 @app_commands.allowed_installs(guilds=False, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
-async def dev_dashboard_slash(interaction: discord.Interaction) -> None:
+@app_commands.choices(visibility=DEV_VISIBILITY_CHOICES)
+async def dev_dashboard_slash(
+    interaction: discord.Interaction,
+    visibility: app_commands.Choice[str] | None = None,
+) -> None:
     if not is_developer_user(interaction.user):
         await send_developer_interaction_denied(interaction)
         return
     await interaction.response.send_message(
         view=DeveloperDashboardView(bot, author_id=interaction.user.id),
-        ephemeral=True,
+        ephemeral=resolve_dev_visibility(visibility),
     )
 
 
@@ -6053,12 +6079,14 @@ async def dev_dashboard_slash(interaction: discord.Interaction) -> None:
         app_commands.Choice(name="Pro", value="pro"),
         app_commands.Choice(name="Pro Plus", value="pro plus"),
         app_commands.Choice(name="Premium Max", value="premium(max)"),
-    ]
+    ],
+    visibility=DEV_VISIBILITY_CHOICES,
 )
 async def dev_gift_slash(
     interaction: discord.Interaction,
     user: discord.Member,
     plan: app_commands.Choice[str],
+    visibility: app_commands.Choice[str] | None = None,
 ) -> None:
     if not is_developer_user(interaction.user):
         await send_developer_interaction_denied(interaction)
@@ -6088,22 +6116,28 @@ async def dev_gift_slash(
             gifted_by_id=interaction.user.id,
             entitlement=entitlement,
         ),
-        ephemeral=True,
+        ephemeral=resolve_dev_visibility(visibility, default_private=False),
     )
 
 
 @dev_group.command(name="purge", description="Purge recent messages in the current channel")
 @app_commands.allowed_installs(guilds=False, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
-async def dev_purge_slash(interaction: discord.Interaction, amount: app_commands.Range[int, 1, 200]) -> None:
+@app_commands.choices(visibility=DEV_VISIBILITY_CHOICES)
+async def dev_purge_slash(
+    interaction: discord.Interaction,
+    amount: app_commands.Range[int, 1, 200],
+    visibility: app_commands.Choice[str] | None = None,
+) -> None:
     if not is_developer_user(interaction.user):
         await send_developer_interaction_denied(interaction)
         return
+    ephemeral = resolve_dev_visibility(visibility)
     if interaction.guild is None or not isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
-        await interaction.response.send_message(embed=make_embed("Purge Failed", "Use this inside a server text channel or thread.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Purge Failed", "Use this inside a server text channel or thread.", EMBED_ERR), ephemeral=ephemeral)
         return
 
-    await interaction.response.defer(ephemeral=True, thinking=False)
+    await interaction.response.defer(ephemeral=ephemeral, thinking=False)
     try:
         deleted_messages = await interaction.channel.purge(
             limit=amount + 1,
@@ -6111,79 +6145,98 @@ async def dev_purge_slash(interaction: discord.Interaction, amount: app_commands
             reason=f"CLINX developer purge by {interaction.user} ({interaction.user.id})",
         )
     except (discord.Forbidden, discord.HTTPException):
-        await interaction.followup.send(embed=make_embed("Purge Failed", "CLINX could not purge messages in this channel.", EMBED_ERR), ephemeral=True)
+        await interaction.followup.send(embed=make_embed("Purge Failed", "CLINX could not purge messages in this channel.", EMBED_ERR), ephemeral=ephemeral)
         return
 
     deleted_count = max(0, len(deleted_messages) - 1)
     await interaction.followup.send(
         embed=make_embed("Purge Complete", f"Deleted `{deleted_count}` recent message(s) in {interaction.channel.mention}.", EMBED_OK),
-        ephemeral=True,
+        ephemeral=ephemeral,
     )
 
 
 @dev_group.command(name="kick", description="Kick a member with developer override")
 @app_commands.allowed_installs(guilds=False, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
-async def dev_kick_slash(interaction: discord.Interaction, user: discord.Member, reason: str | None = None) -> None:
+@app_commands.choices(visibility=DEV_VISIBILITY_CHOICES)
+async def dev_kick_slash(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    reason: str | None = None,
+    visibility: app_commands.Choice[str] | None = None,
+) -> None:
     if not is_developer_user(interaction.user):
         await send_developer_interaction_denied(interaction)
         return
+    ephemeral = resolve_dev_visibility(visibility)
     if interaction.guild is None:
-        await interaction.response.send_message(embed=make_embed("Kick Failed", "Run in a server.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Kick Failed", "Run in a server.", EMBED_ERR), ephemeral=ephemeral)
         return
     try:
         await user.kick(reason=reason or f"CLINX developer kick by {interaction.user} ({interaction.user.id})")
         await interaction.response.send_message(
             embed=make_embed("Kick Executed", f"{user.mention} was kicked by CLINX developer override.", EMBED_OK),
-            ephemeral=True,
+            ephemeral=ephemeral,
         )
     except (discord.Forbidden, discord.HTTPException):
         await interaction.response.send_message(
             embed=make_embed("Kick Failed", f"CLINX could not kick {user.mention}.", EMBED_ERR),
-            ephemeral=True,
+            ephemeral=ephemeral,
         )
 
 
 @dev_group.command(name="ban", description="Ban a member with developer override")
 @app_commands.allowed_installs(guilds=False, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
-async def dev_ban_slash(interaction: discord.Interaction, user: discord.Member, reason: str | None = None) -> None:
+@app_commands.choices(visibility=DEV_VISIBILITY_CHOICES)
+async def dev_ban_slash(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    reason: str | None = None,
+    visibility: app_commands.Choice[str] | None = None,
+) -> None:
     if not is_developer_user(interaction.user):
         await send_developer_interaction_denied(interaction)
         return
+    ephemeral = resolve_dev_visibility(visibility)
     if interaction.guild is None:
-        await interaction.response.send_message(embed=make_embed("Ban Failed", "Run in a server.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Ban Failed", "Run in a server.", EMBED_ERR), ephemeral=ephemeral)
         return
     try:
         await interaction.guild.ban(user, reason=reason or f"CLINX developer ban by {interaction.user} ({interaction.user.id})")
         await interaction.response.send_message(
             embed=make_embed("Ban Executed", f"{user.mention} was banned by CLINX developer override.", EMBED_OK),
-            ephemeral=True,
+            ephemeral=ephemeral,
         )
     except (discord.Forbidden, discord.HTTPException):
         await interaction.response.send_message(
             embed=make_embed("Ban Failed", f"CLINX could not ban {user.mention}.", EMBED_ERR),
-            ephemeral=True,
+            ephemeral=ephemeral,
         )
 
 
 @dev_group.command(name="deleteallroles", description="Delete every manageable role in this server")
 @app_commands.allowed_installs(guilds=False, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
-async def dev_delete_all_roles_slash(interaction: discord.Interaction) -> None:
+@app_commands.choices(visibility=DEV_VISIBILITY_CHOICES)
+async def dev_delete_all_roles_slash(
+    interaction: discord.Interaction,
+    visibility: app_commands.Choice[str] | None = None,
+) -> None:
     if not is_developer_user(interaction.user):
         await send_developer_interaction_denied(interaction)
         return
+    ephemeral = resolve_dev_visibility(visibility)
     if interaction.guild is None:
-        await interaction.response.send_message(embed=make_embed("Role Purge Failed", "Run this in a server.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Role Purge Failed", "Run this in a server.", EMBED_ERR), ephemeral=ephemeral)
         return
 
     me = interaction.guild.me or (interaction.guild.get_member(bot.user.id) if bot.user else None)
     if me is None:
-        await interaction.response.send_message(embed=make_embed("Role Purge Failed", "CLINX could not resolve its member state in this server.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Role Purge Failed", "CLINX could not resolve its member state in this server.", EMBED_ERR), ephemeral=ephemeral)
         return
 
-    await interaction.response.defer(ephemeral=True, thinking=False)
+    await interaction.response.defer(ephemeral=ephemeral, thinking=False)
     deletable_roles: list[discord.Role] = []
     blocked_roles = 0
     for role in sorted(interaction.guild.roles, key=lambda item: item.position, reverse=True):
@@ -6210,28 +6263,33 @@ async def dev_delete_all_roles_slash(interaction: discord.Interaction) -> None:
         result_lines.append(f"Failed: `{failed}`")
     await interaction.followup.send(
         embed=make_embed("Role Purge Complete", "\n".join(result_lines), EMBED_OK if failed == 0 else EMBED_WARN),
-        ephemeral=True,
+        ephemeral=ephemeral,
     )
 
 
 @dev_group.command(name="deleteallchannels", description="Delete every manageable channel in this server")
 @app_commands.allowed_installs(guilds=False, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
-async def dev_delete_all_channels_slash(interaction: discord.Interaction) -> None:
+@app_commands.choices(visibility=DEV_VISIBILITY_CHOICES)
+async def dev_delete_all_channels_slash(
+    interaction: discord.Interaction,
+    visibility: app_commands.Choice[str] | None = None,
+) -> None:
     if not is_developer_user(interaction.user):
         await send_developer_interaction_denied(interaction)
         return
+    ephemeral = resolve_dev_visibility(visibility)
     if interaction.guild is None:
-        await interaction.response.send_message(embed=make_embed("Channel Purge Failed", "Run this in a server.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Channel Purge Failed", "Run this in a server.", EMBED_ERR), ephemeral=ephemeral)
         return
 
     guild = interaction.guild
     me = guild.me or (guild.get_member(bot.user.id) if bot.user else None)
     if me is None:
-        await interaction.response.send_message(embed=make_embed("Channel Purge Failed", "CLINX could not resolve its member state in this server.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Channel Purge Failed", "CLINX could not resolve its member state in this server.", EMBED_ERR), ephemeral=ephemeral)
         return
 
-    await interaction.response.defer(ephemeral=True, thinking=False)
+    await interaction.response.defer(ephemeral=ephemeral, thinking=False)
     channels = [channel for channel in guild.channels if channel.permissions_for(me).manage_channels]
     categories = [channel for channel in channels if isinstance(channel, discord.CategoryChannel)]
     non_categories = [channel for channel in channels if not isinstance(channel, discord.CategoryChannel)]
@@ -6254,24 +6312,30 @@ async def dev_delete_all_channels_slash(interaction: discord.Interaction) -> Non
 
     await interaction.followup.send(
         embed=make_embed("Channel Purge Complete", f"Deleted: `{deleted}`\nFailed: `{failed}`", EMBED_OK if failed == 0 else EMBED_WARN),
-        ephemeral=True,
+        ephemeral=ephemeral,
     )
 
 
 @dev_group.command(name="backupmessages", description="Archive full channel and thread message history")
 @app_commands.allowed_installs(guilds=False, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
-async def dev_backup_messages_slash(interaction: discord.Interaction, guild_id: int | None = None) -> None:
+@app_commands.choices(visibility=DEV_VISIBILITY_CHOICES)
+async def dev_backup_messages_slash(
+    interaction: discord.Interaction,
+    guild_id: int | None = None,
+    visibility: app_commands.Choice[str] | None = None,
+) -> None:
     if not is_developer_user(interaction.user):
         await send_developer_interaction_denied(interaction)
         return
+    ephemeral = resolve_dev_visibility(visibility)
 
     target_guild = interaction.guild if guild_id is None else bot.get_guild(guild_id)
     if target_guild is None:
-        await interaction.response.send_message(embed=make_embed("Message Backup Failed", "Target guild not found.", EMBED_ERR), ephemeral=True)
+        await interaction.response.send_message(embed=make_embed("Message Backup Failed", "Target guild not found.", EMBED_ERR), ephemeral=ephemeral)
         return
 
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    await interaction.response.defer(ephemeral=ephemeral, thinking=True)
     try:
         archive_path, summary = await build_message_archive_for_guild(target_guild, requested_by=interaction.user)
     except discord.Forbidden:
@@ -6281,7 +6345,7 @@ async def dev_backup_messages_slash(interaction: discord.Interaction, guild_id: 
                 "CLINX cannot read one or more channels in that server. Check `View Channel` and `Read Message History` permissions.",
                 EMBED_ERR,
             ),
-            ephemeral=True,
+            ephemeral=ephemeral,
         )
         return
     except Exception as exc:
@@ -6291,7 +6355,7 @@ async def dev_backup_messages_slash(interaction: discord.Interaction, guild_id: 
                 f"CLINX hit an exception while archiving messages.\n`{str(exc)[:1500]}`",
                 EMBED_ERR,
             ),
-            ephemeral=True,
+            ephemeral=ephemeral,
         )
         return
 
@@ -6316,7 +6380,7 @@ async def dev_backup_messages_slash(interaction: discord.Interaction, guild_id: 
     description += "\nDM delivery: `sent`" if dm_sent else "\nDM delivery: `failed or archive too large`"
     if summary.get("storage", {}).get("r2_key"):
         description += f"\nCloud storage: `{summary['storage']['r2_key']}`"
-    await interaction.followup.send(embed=make_embed("Message Backup Complete", description, EMBED_OK), ephemeral=True)
+    await interaction.followup.send(embed=make_embed("Message Backup Complete", description, EMBED_OK), ephemeral=ephemeral)
 
 
 def grant_full_access_for_user(
