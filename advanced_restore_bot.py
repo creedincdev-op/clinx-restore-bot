@@ -644,7 +644,7 @@ def get_backup_vault_policy_for_guild(guild_id: int) -> dict[str, Any]:
         "billing_cycle": None,
         "expires_at": None,
         "grace_ends_at": None,
-        "status_text": f"Free vault • up to `{PLAN_BACKUP_LIMITS['free']}` backups",
+        "status_text": f"Free vault • up to {PLAN_BACKUP_LIMITS['free']} backups",
     }
     if entitlement is None:
         return policy
@@ -659,9 +659,9 @@ def get_backup_vault_policy_for_guild(guild_id: int) -> dict[str, Any]:
         f"{plan_label} Expired"
     )
     status_text = (
-        f"{plan_label} monthly active • Renews: `{format_backup_timestamp(entitlement.get('expires_at'))}`"
+        f"{plan_label} monthly active • Renews {format_backup_timestamp(entitlement.get('expires_at'))}"
         if state == "active" else
-        f"{plan_label} ended • Grace until `{format_backup_timestamp(entitlement.get('grace_ends_at'))}`"
+        f"{plan_label} ended • Grace until {format_backup_timestamp(entitlement.get('grace_ends_at'))}"
         if state == "grace" else
         f"{plan_label} expired • Extra backups above free cap are now at risk"
     )
@@ -715,12 +715,12 @@ def format_backup_retention_label(
 ) -> str:
     state = str(vault_policy.get("state") or "free")
     if state in {"free", "active"}:
-        return "Stored Until: `Until deleted`"
+        return "Stored Until: **Until deleted**"
     if state == "grace":
-        return f"Stored Until: `Grace until {format_backup_timestamp(vault_policy.get('grace_ends_at'))}`"
+        return f"Stored Until: **Grace until {format_backup_timestamp(vault_policy.get('grace_ends_at'))}**"
     if backup_id and backup_id in at_risk_ids:
-        return "Stored Until: `At risk now - renew premium or trim the vault to the free cap`"
-    return "Stored Until: `Retained inside the free cap`"
+        return "Stored Until: **At risk now - renew premium or trim the vault to the free cap**"
+    return "Stored Until: **Retained inside the free cap**"
 
 
 def format_relative_timestamp(value: str | None) -> str:
@@ -3129,28 +3129,36 @@ class BackupListCardView(discord.ui.LayoutView):
             if self.bot_user
             else discord.ui.Button(label="CLINX", disabled=True)
         )
+        is_developer_vault = self.author_id in DEVELOPER_USER_IDS
+        slot_cap_label = "∞" if is_developer_vault else str(self.backup_limit)
         page_entries = self.current_page_entries
         selected_entry = self.selected_entry
         vault_badge = discord.ui.Button(label=self.plan_label, style=discord.ButtonStyle.primary, disabled=True)
         count_badge = discord.ui.Button(
-            label=f"{len(self.entries)}/{self.backup_limit} slots",
+            label=f"{len(self.entries)}/{slot_cap_label} slots",
             style=discord.ButtonStyle.secondary,
             disabled=True,
         )
         vault_feed_text = format_vault_storage_state(self.vault_policy, at_risk_count=len(self.at_risk_ids))
+        header_strip = (
+            "🗂 Private vault lane • 🔐 Owner-locked • ⚡ Restore-ready"
+            if not is_developer_vault else
+            "🗂 Developer vault lane • ♾ Unlimited creator slots • ⚡ Restore-ready"
+        )
 
         if not self.entries:
             container = discord.ui.Container(
                 discord.ui.Section(
                     discord.ui.TextDisplay("## <> Backup Vault"),
                     discord.ui.TextDisplay("Your private CLINX vault is empty right now. Create a new backup to populate it."),
+                    discord.ui.TextDisplay(header_strip),
                     accessory=hero,
                 ),
                 discord.ui.Separator(),
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Vault State"),
                     discord.ui.TextDisplay(
-                        f"`0/{self.backup_limit}` slots used\n"
+                        f"**0/{slot_cap_label}** slots used\n"
                         f"{vault_feed_text}"
                     ),
                     accessory=vault_badge,
@@ -3171,9 +3179,9 @@ class BackupListCardView(discord.ui.LayoutView):
                 page_feed_blocks.append(
                     "\n".join(
                         [
-                            f"{index}. `{entry.get('id', 'unknown')}`",
-                            f"• Source: `{entry.get('source_guild_name', 'Unknown Source')}`",
-                            f"• Created: `{format_backup_timestamp(entry.get('created_at'))}`",
+                            f"**{index}.** **{entry.get('id', 'unknown')}**",
+                            f"↳ Source: **{entry.get('source_guild_name', 'Unknown Source')}**",
+                            f"↳ Created: **{format_backup_timestamp(entry.get('created_at'))}**",
                         ]
                     )
                 )
@@ -3183,13 +3191,14 @@ class BackupListCardView(discord.ui.LayoutView):
                     discord.ui.TextDisplay(
                         "Private recovery IDs owned by your account are listed here."
                     ),
+                    discord.ui.TextDisplay(header_strip),
                     accessory=hero,
                 ),
                 discord.ui.Separator(),
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Vault Feed"),
                     discord.ui.TextDisplay(
-                        f"`{len(self.entries)}/{self.backup_limit}` private backups stored\n"
+                        f"**{len(self.entries)}/{slot_cap_label}** private backups stored\n"
                         f"{vault_feed_text}"
                     ),
                     accessory=discord.ui.Button(label="Private", style=discord.ButtonStyle.secondary, disabled=True),
@@ -3197,7 +3206,7 @@ class BackupListCardView(discord.ui.LayoutView):
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Your Backups"),
                     discord.ui.TextDisplay(
-                        f"Current page: `{self.page + 1}` / `{self.max_page_index + 1}`\n\n"
+                        f"Current page: **{self.page + 1} / {self.max_page_index + 1}**\n\n"
                         f"{chr(10).join(page_feed_blocks[:4]) if page_feed_blocks else '- No backups on this page.'}"
                     ),
                     accessory=count_badge,
@@ -3209,23 +3218,24 @@ class BackupListCardView(discord.ui.LayoutView):
             summary = selected_entry.get("summary")
             created_at = format_backup_timestamp(selected_entry.get("created_at"))
             counts_text = (
-                f"Categories: `{(summary or {}).get('categories_count', 0)}`\n"
-                f"Channels: `{(summary or {}).get('channels_count', 0)}`\n"
-                f"Roles: `{(summary or {}).get('roles_count', 0)}`\n"
+                f"Categories: **{(summary or {}).get('categories_count', 0)}**\n"
+                f"Channels: **{(summary or {}).get('channels_count', 0)}**\n"
+                f"Roles: **{(summary or {}).get('roles_count', 0)}**\n"
                 f"{format_backup_retention_label(selected_entry.get('id'), self.vault_policy, at_risk_ids=self.at_risk_ids)}"
             )
             container = discord.ui.Container(
                 discord.ui.Section(
                     discord.ui.TextDisplay("## <> Backup Vault"),
                     discord.ui.TextDisplay("Select one of your backups, inspect its saved structure, then load or delete it from the same card."),
+                    discord.ui.TextDisplay(header_strip),
                     accessory=hero,
                 ),
                 discord.ui.Separator(),
                 discord.ui.Section(
                     discord.ui.TextDisplay("### Vault Feed"),
                     discord.ui.TextDisplay(
-                        f"`{len(self.entries)}/{self.backup_limit}` private backups stored\n"
-                        f"Current page: `{self.page + 1}` / `{self.max_page_index + 1}`\n"
+                        f"**{len(self.entries)}/{slot_cap_label}** private backups stored\n"
+                        f"Current page: **{self.page + 1} / {self.max_page_index + 1}**\n"
                         f"{vault_feed_text}"
                     ),
                     accessory=count_badge,
@@ -3233,8 +3243,8 @@ class BackupListCardView(discord.ui.LayoutView):
                 discord.ui.Section(
                     discord.ui.TextDisplay(f"### Backup Info - {selected_entry.get('source_guild_name', 'Unknown Source')}"),
                     discord.ui.TextDisplay(
-                        f"ID: `{selected_entry.get('id', 'unknown')}`\n"
-                        f"Created At: `{created_at}`\n"
+                        f"ID: **{selected_entry.get('id', 'unknown')}**\n"
+                        f"Created At: **{created_at}**\n"
                         f"{counts_text}"
                     ),
                     accessory=vault_badge,
